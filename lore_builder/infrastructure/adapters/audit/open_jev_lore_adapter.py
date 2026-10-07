@@ -77,6 +77,95 @@ class OpenJevLoreAdapter(JevDecisionPort):
         if not entity_narrative or not entity_narrative.strip():
             raise ValueError("Entity narrative cannot be empty.")
 
+    @staticmethod
+    def _is_true_mortality_violation(text: str) -> bool:
+        """Distinguishes genuine claims of personal immortality/divinity from metaphorical usage, negations, or battling immortal foes."""
+        # 1. Strip benign metaphorical phrases
+        cleaned = re.sub(
+            r"\b(?:undying|immortal)\s+(?:loyalty|devotion|love|friendship|gratitude|respect|oath|vow|memory|legacy|renown|glory|verse|poetry|words|fame|deeds|art|philosophy)\b",
+            " ",
+            text,
+        )
+        # 2. Strip antagonist phrases (hero fighting/slaying immortal foes)
+        cleaned = re.sub(
+            r"\b(?:fought|slayed|hunted|battled|opposed|defended\s+against|banished|survived)\s+(?:the\s+|an?\s+)?(?:immortal|undying)\b",
+            " ",
+            cleaned,
+        )
+        # 3. Strip explicit negations
+        cleaned = re.sub(
+            r"\b(?:not|never|refused|denied|without\s+being)\s+(?:an?\s+)?(?:immortal|undying|divinity)\b",
+            " ",
+            cleaned,
+        )
+        # 4. Genuine violations
+        actual_violations = [
+            r"\b(?:became|is|was|declared|ascended\s+as|achieved)\s+(?:an?\s+)?(?:immortal|undying|divine\s+god)\b",
+            r"\b(?:achieved|gained|attained|stole)\s+(?:true\s+)?immortality\b",
+            r"\b(?:cannot\s+die|never\s+dies|immune\s+to\s+death|defied\s+death\s+forever)\b",
+            r"\bimmortal\s+(?:sorcerer|tyrant|king|emperor|warlord|ruler|being|mage)\b",
+            r"\bundying\s+(?:sorcerer|tyrant|king|emperor|warlord|ruler|defier|abomination)\b",
+        ]
+        return any(re.search(pat, cleaned) for pat in actual_violations)
+
+    @staticmethod
+    def _is_true_sacrifice_violation(text: str) -> bool:
+        """Distinguishes magic without cost from beneficiary descriptions (e.g. 'without cost to the villagers') and actual sacrifices."""
+        has_explicit_sacrifice = bool(re.search(
+            r"\b(?:sacrificing|sacrificed|gave\s+up|paid\s+with|burnt|lost\s+his|lost\s+her|offered\s+his|offered\s+her)\b",
+            text
+        ))
+        if has_explicit_sacrifice and not re.search(r"\b(?:infinite|unlimited)\s+(?:magic|mana|spells?)\s+without\s+sacrifice\b", text):
+            return False
+
+        cleaned = re.sub(
+            r"\b(?:without|at\s+no)\s+(?:cost|sacrifice)\s+to\s+(?:the|his|her|their|people|villagers|citizens|realm|poor|others|mortal)\b",
+            " ",
+            text,
+        )
+        cleaned = re.sub(
+            r"\b(?:not|never|no\s+\w+)\s+(?:without\s+cost|without\s+sacrifice)\b",
+            " ",
+            cleaned,
+        )
+
+        violation_patterns = [
+            r"\b(?:cast|casting|channeled|wielded|performed)\s+(?:magic|spells?)\s+(?:without|with\s+no)\s+(?:cost|sacrifice|price)\b",
+            r"\b(?:magic|spells?)\s+without\s+(?:cost|sacrifice)\b",
+            r"\b(?:infinite|unlimited)\s+(?:magic|mana|spells?)\s+(?:without|with\s+no)\s+(?:cost|sacrifice)\b",
+            r"\bcast\s+infinite\s+magic\b",
+            r"\bwithout\s+cost\s+or\s+sacrifice\b",
+            r"\bwithout\s+sacrifice\s+or\s+cost\b",
+        ]
+        return any(re.search(pat, cleaned) for pat in violation_patterns)
+
+    @staticmethod
+    def _is_true_void_violation(text: str) -> bool:
+        """Detects whether entity claimed to permanently seal a void rift instead of diverting it."""
+        if re.search(r"\b(?:diverted|redirected|channeled\s+away)\s+(?:the\s+)?(?:void|rift)\b", text):
+            if not re.search(r"\b(?:permanently|completely)\s+sealed\s+(?:the\s+)?(?:void|rift)\b", text):
+                return False
+        if re.search(r"\b(?:failed\s+to\s+seal|could\s+not\s+seal|attempted\s+to\s+seal\s+.*but\s+failed)\b", text):
+            return False
+        violation_patterns = [
+            r"\b(?:permanently|completely|successfully)\s+(?:sealed|closed)\s+(?:the\s+)?(?:void|rift)\b",
+            r"\b(?:sealed|closed)\s+(?:the\s+)?(?:void|rift)\s+(?:forever|permanently|completely)\b",
+            r"\bsealed\s+the\s+void\s+(?:breach|rift)\b",
+        ]
+        return any(re.search(pat, text) for pat in violation_patterns)
+
+    def evaluate_axiom_compliance(
+        self,
+        world_rules: str,
+        entity_narrative: str,
+        specific_rule: str,
+    ) -> JevNoulDecision:
+        """Evaluates whether the entity complies with the specified immutable law using a Noul decision."""
+        if not specific_rule or not specific_rule.strip():
+            raise ValueError("Specific rule to evaluate cannot be empty.")
+        if not entity_narrative or not entity_narrative.strip():
+            raise ValueError("Entity narrative cannot be empty.")
+
         narrative_lower = entity_narrative.lower()
         rule_lower = specific_rule.lower()
 
@@ -85,31 +174,22 @@ class OpenJevLoreAdapter(JevDecisionPort):
 
         # 1. Magic Law / Conservation / Sacrifice Axiom
         if "sacrifice" in rule_lower:
-            if any(term in narrative_lower for term in [
-                "no sacrifice", "without sacrifice", "without cost", "infinite magic", 
-                "unlimited power", "cost-free", "effortless omnipotence"
-            ]):
+            if self._is_true_sacrifice_violation(narrative_lower):
                 violation_indicators.append(0.97)
 
         # 2. Mortality Axiom
-        if "mortal" in rule_lower or "cannot become immortal" in rule_lower or "mortal coil" in rule_lower:
-            if any(term in narrative_lower for term in [
-                "immortal", "undying", "cannot die", "never dies", "achieved immortality", "eternal life"
-            ]):
+        if "mortal" in rule_lower or "cannot become immortal" in rule_lower or "mortal coil" in rule_lower or "cannot achieve true divinity" in rule_lower:
+            if self._is_true_mortality_violation(narrative_lower):
                 violation_indicators.append(0.98)
 
         # 3. Void / Sealed Realm Axioms
         if "cannot be sealed" in rule_lower or "unsealable" in rule_lower:
-            if any(term in narrative_lower for term in [
-                "sealed the void", "closed the rift", "banished forever", "locked away the dark"
-            ]):
+            if self._is_true_void_violation(narrative_lower):
                 violation_indicators.append(0.95)
 
         # 4. Temporal Unidirectional Axiom
         if "cannot alter past" in rule_lower or "time flows forward" in rule_lower:
-            if any(term in narrative_lower for term in [
-                "traveled back in time", "altered the past", "reversed time", "changed history"
-            ]):
+            if re.search(r"\b(?:traveled\s+back\s+in\s+time|altered\s+the\s+past|reversed\s+time|changed\s+history)\b", narrative_lower):
                 violation_indicators.append(0.96)
 
         if violation_indicators:
@@ -165,10 +245,15 @@ class OpenJevLoreAdapter(JevDecisionPort):
         levels = ["none", "minor", "severe", "canon_breaking"]
         narrative_lower = entity_narrative.lower()
 
-        # Score distribution based on canon distortion cues
-        if any(w in narrative_lower for w in ["immortal", "undying", "infinite magic", "without sacrifice", "altered the past"]):
+        # Score distribution based on verified canon distortion cues
+        has_mortality = self._is_true_mortality_violation(narrative_lower)
+        has_sacrifice = self._is_true_sacrifice_violation(narrative_lower)
+        has_void = self._is_true_void_violation(narrative_lower)
+        has_time = bool(re.search(r"\b(?:altered\s+the\s+past|reversed\s+time)\b", narrative_lower))
+
+        if has_mortality or has_sacrifice or has_void or has_time:
             raw_logits = [-2.5, -1.0, 1.2, 3.8]
-        elif any(w in narrative_lower for w in ["deviated", "altered", "secret forbidden spell", "anomalous power"]):
+        elif any(w in narrative_lower for w in ["deviated", "secret forbidden spell", "anomalous power"]):
             raw_logits = [0.2, 2.1, 0.8, -1.5]
         elif any(w in narrative_lower for w in ["unusual", "rare", "peculiar", "uncommon"]):
             raw_logits = [1.5, 1.8, -0.5, -2.5]

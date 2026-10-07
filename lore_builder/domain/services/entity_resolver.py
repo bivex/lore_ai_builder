@@ -85,6 +85,28 @@ class EntityResolutionService:
                 if a not in self._canonical_registry[canonical_name]:
                     self._canonical_registry[canonical_name].append(a)
 
+    def _is_valid_fuzzy_match(self, q: str, target: str, score: float) -> bool:
+        """Guards against false positive merges between distinct short names (e.g. Alden vs Aldon)."""
+        q_tokens = q.split()
+        target_tokens = target.split()
+
+        # Multi-token containment: "Kaelen Voss" inside "Commander Kaelen Voss"
+        if len(q_tokens) >= 1 and len(target_tokens) >= 1:
+            q_set = set(q_tokens)
+            t_set = set(target_tokens)
+            if (len(q_set) > 1 or len(t_set) > 1) and (q_set.issubset(t_set) or t_set.issubset(q_set)):
+                return True
+
+        # Single-token names (e.g. "Alden" vs "Aldon", "Voss" vs "Ross"):
+        # For <= 5 chars, distinct names differ by only 1 letter, Jaro-Winkler gives false >0.90!
+        if len(q_tokens) == 1 and len(target_tokens) == 1:
+            if max(len(q), len(target)) <= 5:
+                return q == target
+            if max(len(q), len(target)) <= 7:
+                return score >= 0.95 and q == target
+
+        return score >= self.match_threshold
+
     def resolve(self, query_name: str) -> Tuple[str, bool]:
         """Resolves query_name to existing canonical entity if similarity exceeds threshold.
         
@@ -100,23 +122,25 @@ class EntityResolutionService:
                 if normalize_entity_name(alias) == norm_query:
                     return canonical, True
 
-        # 2. Fuzzy Jaro-Winkler match
+        # 2. Fuzzy Jaro-Winkler match with false-positive guard
         best_match = None
         best_score = 0.0
 
         for canonical, aliases in self._canonical_registry.items():
-            score = jaro_winkler_similarity(norm_query, normalize_entity_name(canonical))
-            if score > best_score:
+            norm_canonical = normalize_entity_name(canonical)
+            score = jaro_winkler_similarity(norm_query, norm_canonical)
+            if score > best_score and self._is_valid_fuzzy_match(norm_query, norm_canonical, score):
                 best_score = score
                 best_match = canonical
 
             for alias in aliases:
-                ascore = jaro_winkler_similarity(norm_query, normalize_entity_name(alias))
-                if ascore > best_score:
+                norm_alias = normalize_entity_name(alias)
+                ascore = jaro_winkler_similarity(norm_query, norm_alias)
+                if ascore > best_score and self._is_valid_fuzzy_match(norm_query, norm_alias, ascore):
                     best_score = ascore
                     best_match = canonical
 
-        if best_match and best_score >= self.match_threshold:
+        if best_match:
             # Register new variant as alias
             self._canonical_registry[best_match].append(query_name)
             return best_match, True
