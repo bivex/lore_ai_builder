@@ -57,7 +57,10 @@ class Entity(BaseModel):
     era: str = "Вторая Эпоха"
     year: int = 100
     facts: List[str] = Field(default_factory=list, description="Atomic verified facts about this entity")
+    atomic_facts: List[AtomicFact] = Field(default_factory=list, description="Structured verified atomic facts with year and participants")
     relations: List[Relation] = Field(default_factory=list, description="Direct ontological connections to other entities")
+    audit_status: str = Field(default="canonical", description="Verification status: canonical, needs_review, rejected")
+    audit_issues: List[str] = Field(default_factory=list, description="Unresolved audit issues or warnings")
     audit_verdict: Optional[Verdict] = None
     audit_notes: List[str] = Field(default_factory=list)
 
@@ -70,11 +73,19 @@ class Task(BaseModel):
     depth: int = 0
     priority: int = 0
     status: str = "pending"  # pending, in_progress, completed, failed
+    retry_count: int = Field(default=0, description="Execution attempts counter")
+    error_message: Optional[str] = Field(default=None, description="Last failure reason")
 
 
 class WorldBible(BaseModel):
     name: str = "Северное Порубежье: Явь и Навь"
     cosmology: str = "Расколотый мир на границе ледяной Яви и потусторонней Нави, сдерживаемый древними рунными заставами."
+    eras: List[str] = Field(default_factory=lambda: [
+        "Эпоха Первородных Лесов",
+        "Первая Эпоха",
+        "Вторая Эпоха",
+        "Эпоха Застав",
+    ], description="Канонические эпохи вселенной")
     immutable_laws: List[str] = Field(default_factory=lambda: [
         "Магия требует эквивалентной жертвы жизненной силы (закон сохранения чар)",
         "Смертные не могут обрести истинное бессмертие или стать богами",

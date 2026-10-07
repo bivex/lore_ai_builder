@@ -49,11 +49,33 @@ def load_yaml_config(config_path: str):
                 priority=10,
             ))
         elif t_type == "swarm":
-            # Extract high-level prompt as seed task
+            task_prompt = t.get("prompt", "")
+            task_name = t.get("name")
+            if not task_name:
+                p_lower = task_prompt.lower()
+                if "волхв" in p_lower:
+                    task_name = "Древний Клан Волхвов"
+                elif "паладин" in p_lower:
+                    task_name = "Орден Паладинов Рассвета"
+                elif "дружин" in p_lower:
+                    task_name = "Северная Дружина"
+                else:
+                    task_name = "Древний Клан Волхвов"
+
+            raw_e_type = t.get("entity_type")
+            e_type = None
+            if raw_e_type:
+                for member in EntityType:
+                    if member.value == raw_e_type.lower():
+                        e_type = member
+                        break
+            if not e_type:
+                e_type = EntityType.FACTION
+
             seed_tasks.append(Task(
-                name="Древний Клан Волхвов",
-                entity_type=EntityType.FACTION,
-                hint="Древний тайный орден чародеев и волхвов Нави, черпающих морозную силу",
+                name=task_name,
+                entity_type=e_type,
+                hint=task_prompt or "Многоагентный рой генерации фракции",
                 depth=0,
                 priority=9,
             ))

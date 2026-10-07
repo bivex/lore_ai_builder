@@ -55,20 +55,27 @@ class LoreLLMClient:
         if self.use_mock:
             return self._mock_generate_facts_draft(task, world_bible)
 
+        eras_str = ", ".join(world_bible.eras) if getattr(world_bible, "eras", None) else "Первая Эпоха, Вторая Эпоха"
         type_hint = f"Тип сущности: {task.entity_type.value}" if task.entity_type else "Определи тип сущности сам (character, faction, location, historical_event, artifact)."
         system_prompt = (
             f"Ты — строгий архивариус и хронограф вселенной '{world_bible.name}'.\n"
             f"КОСМОЛОГИЯ: {world_bible.cosmology}\n"
+            f"КАНОНИЧЕСКИЕ ЭПОХИ МИРА: {eras_str}\n"
             f"НЕПРЕЛОЖНЫЕ ЗАКОНЫ МИРА:\n"
             + "\n".join(f"- {law}" for law in world_bible.immutable_laws) + "\n\n"
             f"ИЗВЕСТНЫЙ КОНТЕКСТ И ФАКТЫ МИРА:\n{context_facts}\n\n"
             "ТРЕБОВАНИЯ К ФАКТАМ (ШАГ 1: АТОМАРНЫЕ ФАКТЫ):\n"
             "1. Верни ИСКЛЮЧИТЕЛЬНО валидный JSON схемы EntityFactsDraft.\n"
-            "2. Сформулируй ровно 3-4 проверяемых атомарных факта с точным годом (числом) и эпохой.\n"
-            "3. Для смертных персонажей (character) все факты ДОЛЖНЫ укладываться в естественную продолжительность жизни (не более 60-80 лет между событиями).\n"
-            "4. В поле 'relations' укажи 1-3 логичные связи. "
-            "Разрешенные типы: leader_of, predecessor_of, successor_of, member_of, allied_with, enemy_of, located_in, participated_in, possesses, created_by.\n"
-            "ВНИМАНИЕ: Для павших воевод и предшественников используй 'predecessor_of', а не 'enemy_of'!\n\n"
+            f"2. Поле 'era' ДОЛЖНО быть строго одной из канонических эпох: {eras_str}.\n"
+            "3. Сформулируй ровно 3-4 проверяемых атомарных факта с точным годом (числом) и эпохой.\n"
+            "4. Для смертных персонажей (character) все факты ДОЛЖНЫ укладываться в естественную продолжительность жизни (не более 60-80 лет между событиями).\n"
+            "5. В поле 'relations' укажи 1-3 логичные связи с соблюдением онтологии:\n"
+            "   - leader_of / member_of: ТОЛЬКО персонаж -> фракция (character -> faction)\n"
+            "   - participated_in: ТОЛЬКО участие в историческом событии (target: historical_event)\n"
+            "   - located_in: ТОЛЬКО нахождение в локации (target: location)\n"
+            "   - possesses: владение артефактом или локацией (source: character/faction -> target: artifact/location)\n"
+            "   - predecessor_of / successor_of: ТОЛЬКО между сущностями одного типа\n"
+            "   ВНИМАНИЕ: Для павших воевод и предшественников используй 'predecessor_of', а не 'enemy_of'!\n\n"
             "ФОРМАТ JSON:\n"
             "{\n"
             f'  "name": "{task.name}",\n'
@@ -172,6 +179,7 @@ class LoreLLMClient:
             era=draft.era,
             year=draft.year,
             facts=[f.statement for f in draft.facts],
+            atomic_facts=draft.facts,
             relations=draft.relations,
         )
 
@@ -399,7 +407,7 @@ class LoreLLMClient:
                 AtomicFact(year=110, statement=f"{name} основан как укрепленный рубеж на границе Яви и Нави."),
             ]
             rels = [
-                Relation(target="Северная Дружина", type="located_in", context="Место несения дозора"),
+                Relation(target="Северная Дружина", type="created_by", context="Основана воинами дружины как опорный рубеж"),
                 Relation(target="Морозные Пустоши", type="adjacent_to", context="Граничит со стужей"),
             ]
         else:
@@ -448,6 +456,7 @@ class LoreLLMClient:
             era=draft.era,
             year=draft.year,
             facts=[f.statement for f in draft.facts],
+            atomic_facts=draft.facts,
             relations=draft.relations,
         )
 

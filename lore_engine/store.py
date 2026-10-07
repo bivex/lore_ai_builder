@@ -40,6 +40,8 @@ class LoreStore:
                     description TEXT,
                     era TEXT,
                     year INTEGER,
+                    audit_status TEXT DEFAULT 'canonical',
+                    audit_issues TEXT DEFAULT '[]',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -47,7 +49,10 @@ class LoreStore:
                 CREATE TABLE IF NOT EXISTS facts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     entity_name TEXT,
+                    year INTEGER,
+                    era TEXT,
                     statement TEXT,
+                    participants TEXT DEFAULT '[]',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -68,7 +73,9 @@ class LoreStore:
                     source_entity TEXT,
                     depth INTEGER,
                     priority INTEGER,
-                    status TEXT
+                    status TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    error_message TEXT
                 )
             """)
             cursor.execute("""
@@ -80,6 +87,28 @@ class LoreStore:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Schema migrations for existing databases
+            cols_entities = {row["name"] for row in cursor.execute("PRAGMA table_info(entities)").fetchall()}
+            if "audit_status" not in cols_entities:
+                cursor.execute("ALTER TABLE entities ADD COLUMN audit_status TEXT DEFAULT 'canonical'")
+            if "audit_issues" not in cols_entities:
+                cursor.execute("ALTER TABLE entities ADD COLUMN audit_issues TEXT DEFAULT '[]'")
+
+            cols_facts = {row["name"] for row in cursor.execute("PRAGMA table_info(facts)").fetchall()}
+            if "year" not in cols_facts:
+                cursor.execute("ALTER TABLE facts ADD COLUMN year INTEGER")
+            if "era" not in cols_facts:
+                cursor.execute("ALTER TABLE facts ADD COLUMN era TEXT")
+            if "participants" not in cols_facts:
+                cursor.execute("ALTER TABLE facts ADD COLUMN participants TEXT DEFAULT '[]'")
+
+            cols_queue = {row["name"] for row in cursor.execute("PRAGMA table_info(queue)").fetchall()}
+            if "retry_count" not in cols_queue:
+                cursor.execute("ALTER TABLE queue ADD COLUMN retry_count INTEGER DEFAULT 0")
+            if "error_message" not in cols_queue:
+                cursor.execute("ALTER TABLE queue ADD COLUMN error_message TEXT")
+
             conn.commit()
 
     def save_world(self, world: WorldBible) -> None:
@@ -110,8 +139,9 @@ class LoreStore:
             return WorldBible()
 
     def resolve_canonical_name(self, name: str) -> str:
-        """Resolves alias/title variant or typo to an existing canonical entity name in SQLite.
+        """Resolves alias/title variant or grammatical declension to an existing canonical entity name in SQLite.
         E.g. 'Вараг' matches 'Рунный кузнец Вараг', 'Ксентии'/'Ксения' matches 'Воевода Ксения'.
+        Does NOT falsely merge distinct names like 'Радик' and 'Радим'.
         """
         import unicodedata
         clean = name.strip()
@@ -139,6 +169,9 @@ class LoreStore:
                         break
                 return cf
 
+            # Russian grammatical inflection endings for names/nouns
+            INFLECTION_ENDINGS = {"", "а", "я", "у", "ю", "е", "и", "ом", "ем", "ой", "ей", "ы", "ов", "ев", "ам", "ям"}
+
             target_core = strip_titles(clean)
             if len(target_core) >= 3:
                 all_entities = conn.execute("SELECT name FROM entities").fetchall()
@@ -147,9 +180,17 @@ class LoreStore:
                     cand_core = strip_titles(cand)
                     if target_core == cand_core or target_core in cand_core.split() or cand_core in target_core.split():
                         return cand
-                    if abs(len(target_core) - len(cand_core)) <= 1 and min(len(target_core), len(cand_core)) >= 4:
-                        diffs = sum(1 for a, b in zip(target_core, cand_core) if a != b) + abs(len(target_core) - len(cand_core))
-                        if diffs <= 1:
+
+                    # Common stem check with grammatical inflection endings
+                    common_len = 0
+                    min_len = min(len(target_core), len(cand_core))
+                    while common_len < min_len and target_core[common_len] == cand_core[common_len]:
+                        common_len += 1
+
+                    if common_len >= 4:
+                        suff1 = target_core[common_len:]
+                        suff2 = cand_core[common_len:]
+                        if suff1 in INFLECTION_ENDINGS and suff2 in INFLECTION_ENDINGS:
                             return cand
 
         return clean
@@ -167,27 +208,50 @@ class LoreStore:
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO entities (name, entity_type, summary, description, era, year)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO entities (name, entity_type, summary, description, era, year, audit_status, audit_issues)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
                     entity_type=excluded.entity_type,
                     summary=excluded.summary,
                     description=excluded.description,
                     era=excluded.era,
-                    year=excluded.year
-            """, (entity.name, entity.entity_type.value, entity.summary, entity.description, entity.era, entity.year))
+                    year=excluded.year,
+                    audit_status=excluded.audit_status,
+                    audit_issues=excluded.audit_issues
+            """, (
+                entity.name,
+                entity.entity_type.value,
+                entity.summary,
+                entity.description,
+                entity.era,
+                entity.year,
+                entity.audit_status,
+                json.dumps(entity.audit_issues, ensure_ascii=False),
+            ))
 
-            # Commit facts
-            for fact_text in entity.facts:
-                exists = cursor.execute(
-                    "SELECT 1 FROM facts WHERE entity_name=? AND statement=?",
-                    (entity.name, fact_text)
-                ).fetchone()
-                if not exists:
-                    cursor.execute(
-                        "INSERT INTO facts (entity_name, statement) VALUES (?, ?)",
+            # Commit facts with year, era, and participants
+            if entity.atomic_facts:
+                for af in entity.atomic_facts:
+                    exists = cursor.execute(
+                        "SELECT 1 FROM facts WHERE entity_name=? AND statement=?",
+                        (entity.name, af.statement)
+                    ).fetchone()
+                    if not exists:
+                        cursor.execute(
+                            "INSERT INTO facts (entity_name, year, era, statement, participants) VALUES (?, ?, ?, ?, ?)",
+                            (entity.name, af.year, af.era, af.statement, json.dumps(af.participants, ensure_ascii=False))
+                        )
+            else:
+                for fact_text in entity.facts:
+                    exists = cursor.execute(
+                        "SELECT 1 FROM facts WHERE entity_name=? AND statement=?",
                         (entity.name, fact_text)
-                    )
+                    ).fetchone()
+                    if not exists:
+                        cursor.execute(
+                            "INSERT INTO facts (entity_name, year, era, statement, participants) VALUES (?, ?, ?, ?, ?)",
+                            (entity.name, entity.year, entity.era, fact_text, json.dumps([]))
+                        )
 
             # Commit relations with resolved canonical targets
             for rel in entity.relations:
@@ -204,7 +268,10 @@ class LoreStore:
 
             # Mark in queue as completed if it was queued
             resolved_self = self.resolve_canonical_name(entity.name)
-            cursor.execute("UPDATE queue SET status='completed' WHERE py_lower(TRIM(name)) IN (?, ?)", (entity.name.strip().casefold(), resolved_self.strip().casefold()))
+            cursor.execute(
+                "UPDATE queue SET status='completed' WHERE py_lower(TRIM(name)) IN (?, ?)",
+                (entity.name.strip().casefold(), resolved_self.strip().casefold())
+            )
             conn.commit()
 
     def push_task(self, task: Task) -> bool:
@@ -223,9 +290,9 @@ class LoreStore:
 
             type_val = task.entity_type.value if task.entity_type else None
             cursor.execute("""
-                INSERT OR IGNORE INTO queue (name, entity_type, hint, source_entity, depth, priority, status)
-                VALUES (?, ?, ?, ?, ?, ?, 'pending')
-            """, (resolved_name, type_val, task.hint, task.source_entity, task.depth, task.priority))
+                INSERT OR IGNORE INTO queue (name, entity_type, hint, source_entity, depth, priority, status, retry_count, error_message)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            """, (resolved_name, type_val, task.hint, task.source_entity, task.depth, task.priority, task.retry_count, task.error_message))
             inserted = cursor.rowcount > 0
             conn.commit()
             return inserted
@@ -255,7 +322,36 @@ class LoreStore:
                 depth=row["depth"],
                 priority=row["priority"],
                 status="in_progress",
+                retry_count=row["retry_count"] if "retry_count" in row.keys() and row["retry_count"] is not None else 0,
+                error_message=row["error_message"] if "error_message" in row.keys() else None,
             )
+
+    def reset_in_progress_tasks(self) -> int:
+        """Resets dangling in_progress tasks back to pending on engine startup or recovery."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE queue SET status = 'pending' WHERE status = 'in_progress'")
+            cnt = cursor.rowcount
+            conn.commit()
+            return cnt
+
+    def fail_task(self, task_name: str, error: str = "", max_retries: int = 3) -> None:
+        """Marks a task as failed or retries it if retry budget permits."""
+        resolved = self.resolve_canonical_name(task_name)
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT retry_count FROM queue WHERE py_lower(TRIM(name)) IN (?, ?)",
+                (task_name.strip().casefold(), resolved.strip().casefold())
+            ).fetchone()
+            current_retries = row["retry_count"] if row and row["retry_count"] is not None else 0
+            new_retries = current_retries + 1
+            new_status = "failed" if new_retries >= max_retries else "pending"
+            cursor.execute(
+                "UPDATE queue SET status = ?, retry_count = ?, error_message = ? WHERE py_lower(TRIM(name)) IN (?, ?)",
+                (new_status, new_retries, error, task_name.strip().casefold(), resolved.strip().casefold())
+            )
+            conn.commit()
 
     def queue_size(self) -> int:
         with self._get_conn() as conn:
@@ -330,15 +426,23 @@ class LoreStore:
         with self._get_conn() as conn:
             # L1 Atomic facts
             fact_rows = conn.execute("SELECT * FROM facts ORDER BY id ASC").fetchall()
-            l1_facts = [
-                {
+            l1_facts = []
+            for r in fact_rows:
+                participants = []
+                if "participants" in r.keys() and r["participants"]:
+                    try:
+                        participants = json.loads(r["participants"])
+                    except Exception:
+                        participants = []
+                l1_facts.append({
                     "fact_id": f"f_{r['id']:04d}",
                     "entity_name": r["entity_name"],
+                    "year": r["year"] if "year" in r.keys() else None,
+                    "era": r["era"] if "era" in r.keys() else None,
                     "statement": r["statement"],
+                    "participants": participants,
                     "created_at": r["created_at"],
-                }
-                for r in fact_rows
-            ]
+                })
 
             # L0 Conversations
             conv_rows = conn.execute("SELECT * FROM conversations ORDER BY id ASC").fetchall()
@@ -362,6 +466,14 @@ class LoreStore:
                 backlinks = [r["target_name"] for r in rel_rows]
                 e_facts = conn.execute("SELECT statement FROM facts WHERE entity_name = ?", (name,)).fetchall()
 
+                audit_issues = []
+                if "audit_issues" in e.keys() and e["audit_issues"]:
+                    try:
+                        audit_issues = json.loads(e["audit_issues"])
+                    except Exception:
+                        audit_issues = []
+                audit_status = e["audit_status"] if "audit_status" in e.keys() and e["audit_status"] else "canonical"
+
                 wiki_graph[key] = {
                     "title": name,
                     "type": e["entity_type"],
@@ -371,7 +483,8 @@ class LoreStore:
                     "year": e["year"],
                     "backlinks": backlinks,
                     "facts": [f["statement"] for f in e_facts],
-                    "status": "canonical",
+                    "status": audit_status,
+                    "audit_issues": audit_issues,
                 }
 
         payload = {
@@ -413,19 +526,29 @@ class LoreStore:
                     {"target": r["target_name"], "type": r["rel_type"], "context": r["context"]}
                     for r in conn.execute("SELECT target_name, rel_type, context FROM relations WHERE source_name=?", (name,))
                 ]
+                audit_issues = []
+                if "audit_issues" in e.keys() and e["audit_issues"]:
+                    try:
+                        audit_issues = json.loads(e["audit_issues"])
+                    except Exception:
+                        audit_issues = []
+                audit_status = e["audit_status"] if "audit_status" in e.keys() and e["audit_status"] else "canonical"
+                task_status = "SUCCESS" if audit_status == "canonical" else "NEEDS_REVIEW"
+
                 results.append({
                     "task_index": idx,
                     "task_type": "generate",
-                    "status": "SUCCESS",
+                    "status": task_status,
                     "audit": {
-                        "status": "canonical",
+                        "status": audit_status,
                         "validation_method": "Two-Stage Facts->Prose & Zero-Regex Hybrid Judge",
-                        "passed_checks": ["Axiom Compliance", "Temporal Algebra", "Lifespan Bounded", "Alias Deduplication"],
+                        "passed_checks": ["Axiom Compliance", "Temporal Algebra", "Lifespan Bounded", "Ontological Matrix", "Alias Deduplication"],
+                        "issues": audit_issues,
                     },
                     "result": {
                         "entity_name": name,
                         "entity_type": e["entity_type"],
-                        "status": "canonical",
+                        "status": audit_status,
                         "summary": e["summary"],
                         "description": e["description"],
                         "timeline": f"{e['year']} год ({e['era']})",
