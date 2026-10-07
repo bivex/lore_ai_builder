@@ -1,0 +1,6 @@
+[submodule "JobObjects_RD"]
+	path = JobObjects_RD
+	url = https://github.com/bivex/JobObjects_RD
+[submodule "TencentDB-Agent-Memory"]
+	path = TencentDB-Agent-Memory
+	url = https://github.com/TencentCloud/TencentDB-Agent-Memory
