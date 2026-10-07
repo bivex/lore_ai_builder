@@ -27,8 +27,26 @@ class EntityType(str, Enum):
 
 class Relation(BaseModel):
     target: str = Field(description="Name of the referenced entity")
-    type: str = Field(description="Ontological relation type: leader_of, allied_with, enemy_of, located_in, participated_in, cause_of, possesses, member_of")
+    type: str = Field(
+        description="Ontological relation type: leader_of, predecessor_of, successor_of, member_of, allied_with, enemy_of, located_in, participated_in, cause_of, possesses, created_by"
+    )
     context: str = Field(default="", description="Narrative context describing why this relationship exists")
+
+
+class AtomicFact(BaseModel):
+    year: int = Field(description="Точный год события")
+    era: str = Field(default="Вторая Эпоха", description="Эпоха (Первая Эпоха, Вторая Эпоха)")
+    statement: str = Field(description="Атомарное проверяемое утверждение")
+    participants: List[str] = Field(default_factory=list, description="Имена сущностей, упоминаемых в факте")
+
+
+class EntityFactsDraft(BaseModel):
+    name: str
+    entity_type: EntityType
+    era: str = "Вторая Эпоха"
+    year: int = 100
+    facts: List[AtomicFact] = Field(default_factory=list, description="3-4 атомарных проверяемых факта")
+    relations: List[Relation] = Field(default_factory=list, description="Прямые онтологические связи")
 
 
 class Entity(BaseModel):
@@ -36,10 +54,12 @@ class Entity(BaseModel):
     entity_type: EntityType
     summary: str
     description: str
-    era: str = "Первая Эпоха"
+    era: str = "Вторая Эпоха"
     year: int = 100
     facts: List[str] = Field(default_factory=list, description="Atomic verified facts about this entity")
     relations: List[Relation] = Field(default_factory=list, description="Direct ontological connections to other entities")
+    audit_verdict: Optional[Verdict] = None
+    audit_notes: List[str] = Field(default_factory=list)
 
 
 class Task(BaseModel):

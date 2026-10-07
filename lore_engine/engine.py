@@ -1,6 +1,6 @@
 import logging
 from typing import List, Optional, Callable
-from .models import Entity, Task, WorldBible
+from .models import Entity, Task, WorldBible, EntityFactsDraft
 from .store import LoreStore
 from .judge import LoreJudge
 from .llm import LoreLLMClient
@@ -9,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class AutonomousLoreEngine:
-    """Core autonomous worldbuilding engine powered by the Red-Links queue growth algorithm and self-healing canon repair."""
+    """Core autonomous worldbuilding engine powered by Two-Stage (Facts -> Prose) generation,
+    Red-Links queue growth algorithm, and zero-regex hybrid canon verification.
+    """
 
     def __init__(
         self,
@@ -20,7 +22,7 @@ class AutonomousLoreEngine:
         max_entities: int = 10,
         max_depth: int = 3,
         on_entity_generated: Optional[Callable[[Entity, Task, List[Task]], None]] = None,
-        on_repair_attempt: Optional[Callable[[Entity, List[str], int], None]] = None,
+        on_repair_attempt: Optional[Callable[[Any, List[str], int], None]] = None,
     ):
         self.store = store
         self.llm = llm
@@ -51,40 +53,56 @@ class AutonomousLoreEngine:
             if not task:
                 break
 
-            # Avoid re-generating existing entities
-            if self.store.exists_entity(task.name):
+            # Avoid re-generating existing entities (with alias resolution)
+            resolved_task_name = self.store.resolve_canonical_name(task.name)
+            if self.store.exists_entity(resolved_task_name):
                 continue
 
-            # 1. Retrieve compact context
+            # 1. Retrieve compact compressed context
             context_facts = self.store.get_context_facts(task, limit=5)
 
-            # 2. Generate entity
+            # 2. STAGE 1: Generate atomic facts and relations draft (Facts-first)
             try:
-                entity = self.llm.generate_entity(task, context_facts, self.world_bible)
+                draft: EntityFactsDraft = self.llm.generate_facts_draft(task, context_facts, self.world_bible)
             except Exception as e:
-                logger.error(f"Failed to generate entity for task '{task.name}': {e}")
+                logger.error(f"Failed to generate facts draft for task '{task.name}': {e}")
                 continue
 
-            # 3. Self-healing reflection loop (up to 3 repair attempts)
+            # 3. STAGE 2: Self-healing audit and repair on facts draft
+            draft_problems = []
             for attempt in range(1, 4):
-                problems = self.judge.audit(entity, self.world_bible, context_facts)
-                if not problems:
+                draft_problems = self.judge.audit_draft(draft, self.world_bible, context_facts)
+                if not draft_problems:
                     break
 
                 if self.on_repair_attempt:
-                    self.on_repair_attempt(entity, problems, attempt)
+                    self.on_repair_attempt(draft, draft_problems, attempt)
 
                 try:
-                    entity = self.llm.repair_entity(entity, problems, context_facts, self.world_bible)
+                    draft = self.llm.repair_facts_draft(draft, draft_problems, context_facts, self.world_bible)
                 except Exception as e:
-                    logger.warning(f"Repair attempt {attempt} failed for '{entity.name}': {e}")
+                    logger.warning(f"Repair draft attempt {attempt} failed for '{draft.name}': {e}")
                     break
 
-            # 4. Commit to SQLite
+            # 4. STAGE 3: Synthesize summary and prose STRICTLY from accepted facts
+            try:
+                entity = self.llm.synthesize_prose(task, draft, self.world_bible)
+            except Exception as e:
+                logger.error(f"Prose synthesis failed for '{task.name}': {e}")
+                continue
+
+            entity.audit_notes = draft_problems
+
+            # 5. Commit to SQLite & Record L0 raw conversation
             self.store.commit_entity(entity)
+            self.store.record_conversation(
+                session_id=f"session_{entity.name.lower().replace(' ', '_')}",
+                prompt=f"Task: {task.name} | Context: {context_facts[:200]}...",
+                response=entity.model_dump_json(indent=2),
+            )
             generated.append(entity)
 
-            # 5. Red-Links Expansion: Unknown targets become new tasks in the queue
+            # 6. Red-Links Expansion: Unknown targets become new tasks in the queue
             new_red_links = []
             if task.depth + 1 <= self.max_depth:
                 for rel in entity.relations:
@@ -92,10 +110,13 @@ class AutonomousLoreEngine:
                     if not target_name:
                         continue
 
+                    # Canonical alias resolution (e.g. 'Вараг' -> 'Рунный кузнец Вараг')
+                    resolved_target = self.store.resolve_canonical_name(target_name)
+
                     # If target doesn't exist in store, queue it as a red-link task
-                    if not self.store.exists_entity(target_name):
+                    if not self.store.exists_entity(resolved_target):
                         red_task = Task(
-                            name=target_name,
+                            name=resolved_target,
                             hint=f"Связана с '{entity.name}': {rel.context} (отношение: {rel.type})",
                             source_entity=entity.name,
                             depth=task.depth + 1,
@@ -104,7 +125,7 @@ class AutonomousLoreEngine:
                         if self.store.push_task(red_task):
                             new_red_links.append(red_task)
 
-            # 6. Notify callback
+            # 7. Notify callback
             if self.on_entity_generated:
                 self.on_entity_generated(entity, task, new_red_links)
 

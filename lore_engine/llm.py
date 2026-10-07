@@ -1,18 +1,29 @@
 import os
 import json
-import re
 import logging
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from .models import Entity, Relation, Task, WorldBible, EntityType, Violation, Verdict
+from .models import (
+    Entity,
+    Relation,
+    Task,
+    WorldBible,
+    EntityType,
+    Violation,
+    Verdict,
+    AtomicFact,
+    EntityFactsDraft,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class LoreLLMClient:
-    """Unified OpenAI-compatible LLM client supporting OpenRouter and Ollama with structured generation and repair."""
+    """Unified OpenAI-compatible LLM client supporting Two-Stage 'Facts-First -> Prose' generation,
+    structured JSON validation, and self-healing reflection.
+    """
 
     def __init__(
         self,
@@ -35,70 +46,163 @@ class LoreLLMClient:
         else:
             self._client = None
 
-    def generate_entity(self, task: Task, context_facts: str, world_bible: WorldBible) -> Entity:
-        """Generates a complete lore entity with facts and outward relations."""
+    # =========================================================================
+    # STAGE 1: FACTS-FIRST DRAFT GENERATION
+    # =========================================================================
+
+    def generate_facts_draft(self, task: Task, context_facts: str, world_bible: WorldBible) -> EntityFactsDraft:
+        """Stage 1: Generates atomic verifiable facts and typed relations (Facts-first)."""
         if self.use_mock:
-            return self._mock_generate(task, world_bible)
+            return self._mock_generate_facts_draft(task, world_bible)
 
         type_hint = f"Тип сущности: {task.entity_type.value}" if task.entity_type else "Определи тип сущности сам (character, faction, location, historical_event, artifact)."
         system_prompt = (
-            f"Ты — главный летописец вселенной '{world_bible.name}'.\n"
+            f"Ты — строгий архивариус и хронограф вселенной '{world_bible.name}'.\n"
             f"КОСМОЛОГИЯ: {world_bible.cosmology}\n"
-            f"НЕПРЕЛОЖНЫЕ ЗАКОНЫ МИРА (АКСИОМЫ):\n"
+            f"НЕПРЕЛОЖНЫЕ ЗАКОНЫ МИРА:\n"
             + "\n".join(f"- {law}" for law in world_bible.immutable_laws) + "\n\n"
             f"ИЗВЕСТНЫЙ КОНТЕКСТ И ФАКТЫ МИРА:\n{context_facts}\n\n"
-            "ТРЕБОВАНИЯ:\n"
-            "1. Верни ИСКЛЮЧИТЕЛЬНО валидный JSON без лишнего текста.\n"
-            "2. Соблюдай все непреложные законы мира (особенно цену магии и смертность).\n"
-            "3. Укажи 2-3 атомарных факта с точным годом.\n"
-            "4. В поле 'relations' укажи 1-3 логичные связи с другими сущностями мира (новые или существующие). "
-            "Разрешенные типы связей: leader_of, allied_with, enemy_of, located_in, participated_in, cause_of, possesses, member_of.\n\n"
+            "ТРЕБОВАНИЯ К ФАКТАМ (ШАГ 1: АТОМАРНЫЕ ФАКТЫ):\n"
+            "1. Верни ИСКЛЮЧИТЕЛЬНО валидный JSON схемы EntityFactsDraft.\n"
+            "2. Сформулируй ровно 3-4 проверяемых атомарных факта с точным годом (числом) и эпохой.\n"
+            "3. Для смертных персонажей (character) все факты ДОЛЖНЫ укладываться в естественную продолжительность жизни (не более 60-80 лет между событиями).\n"
+            "4. В поле 'relations' укажи 1-3 логичные связи. "
+            "Разрешенные типы: leader_of, predecessor_of, successor_of, member_of, allied_with, enemy_of, located_in, participated_in, possesses, created_by.\n"
+            "ВНИМАНИЕ: Для павших воевод и предшественников используй 'predecessor_of', а не 'enemy_of'!\n\n"
             "ФОРМАТ JSON:\n"
             "{\n"
             f'  "name": "{task.name}",\n'
             '  "entity_type": "character|faction|location|historical_event|artifact",\n'
-            '  "summary": "Краткое саммари (1-2 предложения)",\n'
-            '  "description": "Подробное художественное описание",\n'
-            '  "era": "Первая Эпоха|Вторая Эпоха",\n'
-            '  "year": 120,\n'
-            '  "facts": ["Факт 1", "Факт 2"],\n'
-            '  "relations": [{"target": "Имя Цели", "type": "enemy_of", "context": "Контекст связи"}]\n'
+            '  "era": "Вторая Эпоха",\n'
+            '  "year": 325,\n'
+            '  "facts": [\n'
+            '    {\n'
+            '      "year": 325,\n'
+            '      "era": "Вторая Эпоха",\n'
+            '      "statement": "325 год: Точное проверяемое утверждение события с соблюдением законов мира.",\n'
+            '      "participants": ["Имя 1", "Имя 2"]\n'
+            '    }\n'
+            '  ],\n'
+            '  "relations": [\n'
+            '    {"target": "Цель", "type": "predecessor_of|allied_with|located_in", "context": "Контекст связи"}\n'
+            '  ]\n'
             "}"
         )
 
         user_prompt = (
-            f"Создай сущность: '{task.name}'.\n"
+            f"Сформируй факты и связи для сущности: '{task.name}'.\n"
             f"{type_hint}\n"
-            f"Контекстная подсказка / происхождение: {task.hint or 'Первородная сущность мира'}\n"
+            f"Контекстная подсказка: {task.hint or 'Первородная сущность мира'}\n"
             f"Глубина в графе: {task.depth}"
         )
 
         raw = self._call_llm(system_prompt, user_prompt)
-        return self._parse_entity_json(raw, task.name)
+        return self._parse_facts_draft_json(raw, task.name)
 
-    def repair_entity(self, entity: Entity, problems: List[str], context_facts: str, world_bible: WorldBible) -> Entity:
-        """Self-healing reflection loop: repairs an entity that failed canon judge."""
+    def repair_facts_draft(
+        self,
+        draft: EntityFactsDraft,
+        problems: List[str],
+        context_facts: str,
+        world_bible: WorldBible,
+    ) -> EntityFactsDraft:
+        """Repairs draft facts and relations that failed audit."""
         if self.use_mock:
-            return self._mock_repair(entity, problems)
+            return self._mock_repair_facts_draft(draft, problems)
 
         system_prompt = (
-            f"Ты — строгий редактор канона вселенной '{world_bible.name}'.\n"
+            f"Ты — строгий редактор хроники вселенной '{world_bible.name}'.\n"
             f"ЗАКОНЫ МИРА:\n" + "\n".join(f"- {l}" for l in world_bible.immutable_laws) + "\n\n"
-            "Предыдущая версия сущности не прошла проверку канона. Твоя задача — исправить текст так, "
-            "чтобы убрать все выявленные противоречия, сохранив суть и верность законам мира.\n"
-            "Верни ИСКЛЮЧИТЕЛЬНО исправленный валидный JSON в той же структуре."
+            "Черновик фактов сущности не прошёл проверку канона. Твоя задача — исправить факты и связи.\n"
+            "Верни ИСКЛЮЧИТЕЛЬНО исправленный JSON схемы EntityFactsDraft."
         )
 
         user_prompt = (
-            f"Сущность: '{entity.name}'\n"
-            f"Текущий JSON:\n{entity.model_dump_json(indent=2)}\n\n"
-            "ПРОБЛЕМЫ И ЗАМЕЧАНИЯ СУДЬИ КАНОНА:\n"
-            + "\n".join(f"- {p}" for p in problems) + "\n\n"
-            "Исправь сущность, чтобы она строго соответствовала законам мира и замечаниям судьи."
+            f"Сущность: '{draft.name}'\n"
+            f"Текущий JSON черновика:\n{draft.model_dump_json(indent=2)}\n\n"
+            "ЗАМЕЧАНИЯ АУДИТА:\n" + "\n".join(f"- {p}" for p in problems) + "\n\n"
+            "Исправь факты, даты и типы связей в соответствии с замечаниями."
         )
 
         raw = self._call_llm(system_prompt, user_prompt)
-        return self._parse_entity_json(raw, entity.name)
+        return self._parse_facts_draft_json(raw, draft.name)
+
+    # =========================================================================
+    # STAGE 2: PROSE SYNTHESIS STRICTLY FROM ACCEPTED FACTS
+    # =========================================================================
+
+    def synthesize_prose(self, task: Task, draft: EntityFactsDraft, world_bible: WorldBible) -> Entity:
+        """Stage 2: Synthesizes summary and description strictly derived from accepted facts."""
+        if self.use_mock:
+            return self._mock_synthesize_prose(task, draft, world_bible)
+
+        facts_text = "\n".join(f"- {f.statement}" for f in draft.facts)
+        rels_text = "\n".join(f"- [{r.type}] {r.target} ({r.context})" for r in draft.relations)
+
+        system_prompt = (
+            f"Ты — мастер художественной прозы и стиля вселенной '{world_bible.name}'.\n"
+            "Твоя задача — написать краткое саммари и выразительное описание сущности СТРОГО на основе утверждённых фактов.\n\n"
+            "УТВЕРЖДЁННЫЕ ФАКТЫ:\n"
+            f"{facts_text}\n\n"
+            "СВЯЗИ СУЩНОСТИ:\n"
+            f"{rels_text}\n\n"
+            "СТРОЖАЙШИЕ ПРАВИЛА:\n"
+            "1. ЗАПРЕЩЕНО добавлять новые исторические факты, события, сражения, даты, числа или артефакты, которых нет в списке утверждённых фактов выше. Обобщай ТОЛЬКО то, что подтверждено.\n"
+            "2. СТИЛЬ: Суровое славянское тёмное фэнтези (Явь, Навь, хлад, рунные заставы). СТРОГО ЗАПРЕЩЕНЫ техно-анахронизмы (никаких шестерёнок, механики, часовых устройств).\n"
+            "3. ЯЗЫК: Безупречный литературный русский язык. Запрещены псевдо-славянские слова-галлюцинации (никаких 'очглавил', 'навистный хладост', 'молоточи удары').\n"
+            "4. Верни ИСКЛЮЧИТЕЛЬНО валидный JSON:\n"
+            "{\n"
+            '  "summary": "Лаконичное саммари (1-2 предложения, строго обобщающее факты)",\n'
+            '  "description": "Художественное описание (1-2 абзаца, строго опирающееся только на утверждённые факты)"\n'
+            "}"
+        )
+
+        user_prompt = f"Напиши саммари и описание для '{draft.name}' ({draft.entity_type.value})."
+        raw = self._call_llm(system_prompt, user_prompt)
+        parsed = self._parse_json_dict(raw)
+
+        summary = str(parsed.get("summary", "")).strip() or f"{draft.name} — защитник Порубежья."
+        description = str(parsed.get("description", "")).strip() or summary
+
+        return Entity(
+            name=draft.name,
+            entity_type=draft.entity_type,
+            summary=summary,
+            description=description,
+            era=draft.era,
+            year=draft.year,
+            facts=[f.statement for f in draft.facts],
+            relations=draft.relations,
+        )
+
+    def generate_entity(self, task: Task, context_facts: str, world_bible: WorldBible) -> Entity:
+        """High-level generator composing two-stage generation: Facts -> Prose."""
+        draft = self.generate_facts_draft(task, context_facts, world_bible)
+        return self.synthesize_prose(task, draft, world_bible)
+
+    def repair_entity(self, entity: Entity, problems: List[str], context_facts: str, world_bible: WorldBible) -> Entity:
+        """Backward-compatible repair fallback."""
+        if self.use_mock:
+            return self._mock_repair(entity, problems)
+
+        # Convert to draft, repair, then re-synthesize prose
+        facts_list = []
+        for f in entity.facts:
+            facts_list.append(AtomicFact(year=entity.year, era=entity.era, statement=f))
+        draft = EntityFactsDraft(
+            name=entity.name,
+            entity_type=entity.entity_type,
+            era=entity.era,
+            year=entity.year,
+            facts=facts_list,
+            relations=entity.relations,
+        )
+        repaired_draft = self.repair_facts_draft(draft, problems, context_facts, world_bible)
+        return self.synthesize_prose(Task(name=entity.name, entity_type=entity.entity_type), repaired_draft, world_bible)
+
+    # =========================================================================
+    # AUDIT VERDICT
+    # =========================================================================
 
     def audit_entity(self, entity: Entity, world_bible: WorldBible) -> Verdict:
         """Structured LLM-Judge audit replacing brittle regular expressions."""
@@ -142,7 +246,44 @@ class LoreLLMClient:
         raw = self._call_llm(system_prompt, user_prompt)
         return self._parse_verdict_json(raw)
 
-    def _parse_verdict_json(self, raw_text: str) -> Verdict:
+    # =========================================================================
+    # CALLS & PARSERS
+    # =========================================================================
+
+    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
+        import time
+        max_attempts = 3
+        last_error = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=2500,
+                )
+                if resp and getattr(resp, "choices", None) and len(resp.choices) > 0:
+                    choice = resp.choices[0]
+                    msg = getattr(choice, "message", None)
+                    if msg:
+                        content = msg.content or getattr(msg, "reasoning", None) or ""
+                        if content:
+                            return content
+
+                logger.warning(f"Empty choices returned from LLM on attempt {attempt}/{max_attempts}")
+            except Exception as e:
+                last_error = e
+                logger.warning(f"LLM API call attempt {attempt}/{max_attempts} failed: {e}")
+
+            time.sleep(1.5 * attempt)
+
+        raise RuntimeError(f"OpenRouter/LLM inference failure after {max_attempts} attempts: {last_error}")
+
+    def _parse_json_dict(self, raw_text: str) -> Dict[str, Any]:
         cleaned = raw_text.strip()
         if "```json" in cleaned:
             cleaned = cleaned.split("```json")[1].split("```")[0]
@@ -150,18 +291,60 @@ class LoreLLMClient:
             cleaned = cleaned.split("```")[1].split("```")[0]
 
         try:
-            data = json.loads(cleaned.strip())
+            return json.loads(cleaned.strip())
         except Exception:
             start = cleaned.find("{")
             end = cleaned.rfind("}")
             if start != -1 and end != -1:
-                try:
-                    data = json.loads(cleaned[start:end+1])
-                except Exception:
-                    return Verdict(is_valid=True, violations=[], needs_review=True)
-            else:
-                return Verdict(is_valid=True, violations=[], needs_review=True)
+                return json.loads(cleaned[start:end+1])
+            return {}
 
+    def _parse_facts_draft_json(self, raw_text: str, expected_name: str) -> EntityFactsDraft:
+        data = self._parse_json_dict(raw_text)
+        data["name"] = data.get("name") or expected_name
+
+        raw_type = str(data.get("entity_type", "character")).lower()
+        valid_types = {e.value: e for e in EntityType}
+        entity_type = valid_types.get(raw_type, EntityType.CHARACTER)
+
+        raw_facts = data.get("facts", [])
+        facts = []
+        for rf in raw_facts:
+            if isinstance(rf, dict):
+                facts.append(AtomicFact(
+                    year=int(rf.get("year", data.get("year", 100))),
+                    era=str(rf.get("era", data.get("era", "Вторая Эпоха"))),
+                    statement=str(rf.get("statement", "")),
+                    participants=rf.get("participants", []),
+                ))
+            elif isinstance(rf, str):
+                facts.append(AtomicFact(
+                    year=int(data.get("year", 100)),
+                    era=str(data.get("era", "Вторая Эпоха")),
+                    statement=rf,
+                    participants=[],
+                ))
+
+        relations = []
+        for r in data.get("relations", []):
+            if isinstance(r, dict) and "target" in r and "type" in r:
+                relations.append(Relation(
+                    target=str(r["target"]).strip(),
+                    type=str(r.get("type", "allied_with")).lower().strip(),
+                    context=str(r.get("context", "")).strip(),
+                ))
+
+        return EntityFactsDraft(
+            name=data["name"],
+            entity_type=entity_type,
+            era=str(data.get("era", "Вторая Эпоха")),
+            year=int(data.get("year", 100)),
+            facts=facts,
+            relations=relations,
+        )
+
+    def _parse_verdict_json(self, raw_text: str) -> Verdict:
+        data = self._parse_json_dict(raw_text)
         violations_raw = data.get("violations", [])
         violations = []
         for v in violations_raw:
@@ -178,12 +361,117 @@ class LoreLLMClient:
             needs_review=bool(data.get("needs_review", False)),
         )
 
+    # =========================================================================
+    # MOCK IMPLEMENTATIONS FOR TESTS / OFFLINE
+    # =========================================================================
+
+    def _mock_generate_facts_draft(self, task: Task, world_bible: WorldBible) -> EntityFactsDraft:
+        name = task.name
+        name_lower = name.lower()
+
+        if any(w in name_lower for w in ["клан", "орден", "дружина"]):
+            e_type = EntityType.FACTION
+            if "волхв" in name_lower:
+                year = 150
+                facts = [
+                    AtomicFact(year=150, statement=f"{name} основан в 150 году у ледяного разлома."),
+                    AtomicFact(year=160, statement=f"{name} ведет войну со светлыми орденами за контроль рубежей."),
+                ]
+                rels = [Relation(target="Орден Паладинов Рассвета", type="enemy_of", context="Священная вражда за земли")]
+            elif "дружина" in name_lower:
+                year = 312
+                facts = [
+                    AtomicFact(year=312, statement=f"{name} возглавлена воеводой Радомиром."),
+                    AtomicFact(year=315, statement=f"{name} держит оборону у Врат Белокамня."),
+                ]
+                rels = [Relation(target="Застава Яви", type="located_in", context="Опорный пункт обороны")]
+            else:
+                year = 160
+                facts = [
+                    AtomicFact(year=160, statement=f"{name} воздвиг башни света."),
+                    AtomicFact(year=170, statement=f"{name} отражает набеги Нави."),
+                ]
+                rels = [Relation(target="Древний Клан Волхвов", type="enemy_of", context="Борьба со стужей")]
+        elif any(w in name_lower for w in ["пустоши", "застава", "врата", "рубеж"]):
+            e_type = EntityType.LOCATION
+            year = 110
+            facts = [
+                AtomicFact(year=110, statement=f"{name} основан как укрепленный рубеж на границе Яви и Нави."),
+            ]
+            rels = [
+                Relation(target="Северная Дружина", type="located_in", context="Место несения дозора"),
+                Relation(target="Морозные Пустоши", type="adjacent_to", context="Граничит со стужей"),
+            ]
+        else:
+            e_type = EntityType.CHARACTER
+            year = 312
+            facts = [
+                AtomicFact(year=312, statement=f"{name} избран верховным воеводой в 312 году."),
+                AtomicFact(year=315, statement=f"{name} принес в жертву часть жизненной силы ради сдерживания Врат в 315 году."),
+            ]
+            rels = [
+                Relation(target="Северная Дружина", type="leader_of", context="Командует ратью"),
+                Relation(target="Застава Яви", type="located_in", context="Несет дозор на рубеже"),
+            ]
+
+        return EntityFactsDraft(
+            name=name,
+            entity_type=e_type,
+            era="Первая Эпоха",
+            year=year,
+            facts=facts,
+            relations=rels,
+        )
+
+    def _mock_repair_facts_draft(self, draft: EntityFactsDraft, problems: List[str]) -> EntityFactsDraft:
+        clean_facts = []
+        for f in draft.facts:
+            st = f.statement.replace("без жертвы", "ценой великой жертвы").replace("бессмертный", "доблестный")
+            clean_facts.append(AtomicFact(year=f.year, era=f.era, statement=st, participants=f.participants))
+        return EntityFactsDraft(
+            name=draft.name,
+            entity_type=draft.entity_type,
+            era=draft.era,
+            year=draft.year,
+            facts=clean_facts,
+            relations=draft.relations,
+        )
+
+    def _mock_synthesize_prose(self, task: Task, draft: EntityFactsDraft, world_bible: WorldBible) -> Entity:
+        summary = f"{draft.name} — {draft.entity_type.value} вселенной '{world_bible.name}'."
+        description = f"{summary} Основные события: " + "; ".join(f.statement for f in draft.facts)
+        return Entity(
+            name=draft.name,
+            entity_type=draft.entity_type,
+            summary=summary,
+            description=description,
+            era=draft.era,
+            year=draft.year,
+            facts=[f.statement for f in draft.facts],
+            relations=draft.relations,
+        )
+
+    def _mock_generate(self, task: Task, world_bible: WorldBible) -> Entity:
+        draft = self._mock_generate_facts_draft(task, world_bible)
+        return self._mock_synthesize_prose(task, draft, world_bible)
+
+    def _mock_repair(self, entity: Entity, problems: List[str]) -> Entity:
+        facts = [f.replace("без жертвы", "ценой жертвы").replace("бессмертный", "смертный") for f in entity.facts]
+        return Entity(
+            name=entity.name,
+            entity_type=entity.entity_type,
+            summary=entity.summary.replace("бессмертный", "доблестный"),
+            description=entity.description.replace("без жертвы", "ценой жертвы").replace("бессмертный", "смертный"),
+            era=entity.era,
+            year=entity.year,
+            facts=facts,
+            relations=entity.relations,
+        )
+
     def _mock_audit(self, entity: Entity, world_bible: WorldBible) -> Verdict:
-        """Deterministic zero-regex mock judge for tests and offline usage."""
         text = f"{entity.summary} {entity.description} {' '.join(entity.facts)}".casefold()
         violations = []
 
-        # Mortality check: true claims of personal immortality or becoming a god
         if any(w in text for w in ["бессмертный чародей", "бессмертный тиран", "вечным богом", "immortal tyrant", "became immortal"]):
             if not any(neg in text for neg in ["не был", "не стал", "not immortal", "never claimed"]):
                 axiom_text = world_bible.immutable_laws[1] if len(world_bible.immutable_laws) > 1 else "Смертные не могут обрести истинное бессмертие или стать богами"
@@ -194,7 +482,6 @@ class LoreLLMClient:
                     severity="canon_breaking",
                 ))
 
-        # Sacrifice check: magic without price
         if any(w in text for w in ["магию без жертвы", "магию без платы", "колдовал без платы", "magic without sacrifice"]):
             axiom_text = world_bible.immutable_laws[0] if len(world_bible.immutable_laws) > 0 else "Магия требует эквивалентной жертвы жизненной силы (закон сохранения чар)"
             violations.append(Violation(
@@ -208,150 +495,4 @@ class LoreLLMClient:
             is_valid=len(violations) == 0,
             violations=violations,
             needs_review=False,
-        )
-
-    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
-        import time
-        max_attempts = 3
-        last_error = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                resp = self._client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.7,
-                    max_tokens=1500,
-                )
-                if resp and getattr(resp, "choices", None) and len(resp.choices) > 0:
-                    choice = resp.choices[0]
-                    if choice and getattr(choice, "message", None) and choice.message.content:
-                        return choice.message.content
-
-                logger.warning(f"Empty choices returned from LLM on attempt {attempt}/{max_attempts}")
-            except Exception as e:
-                last_error = e
-                logger.warning(f"LLM API call attempt {attempt}/{max_attempts} failed: {e}")
-
-            time.sleep(1.5 * attempt)
-
-        raise RuntimeError(f"OpenRouter/LLM inference failure after {max_attempts} attempts: {last_error}")
-
-    def _parse_entity_json(self, raw_text: str, expected_name: str) -> Entity:
-        cleaned = raw_text.strip()
-        if "```json" in cleaned:
-            cleaned = cleaned.split("```json")[1].split("```")[0]
-        elif "```" in cleaned:
-            cleaned = cleaned.split("```")[1].split("```")[0]
-
-        try:
-            data = json.loads(cleaned.strip())
-        except Exception as e:
-            # Try to extract the first {...} block
-            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
-            else:
-                raise ValueError(f"Failed to parse LLM JSON output for '{expected_name}': {e}. Raw: {raw_text[:200]}")
-
-        # Ensure name consistency
-        data["name"] = data.get("name") or expected_name
-
-        # Parse relations safely
-        clean_relations = []
-        for r in data.get("relations", []):
-            if isinstance(r, dict) and "target" in r and "type" in r:
-                clean_relations.append(Relation(
-                    target=str(r["target"]).strip(),
-                    type=str(r.get("type", "allied_with")).lower().strip(),
-                    context=str(r.get("context", "")).strip(),
-                ))
-        data["relations"] = clean_relations
-
-        # Normalize entity type
-        raw_type = str(data.get("entity_type", "character")).lower()
-        valid_types = {e.value: e for e in EntityType}
-        data["entity_type"] = valid_types.get(raw_type, EntityType.CHARACTER)
-
-        return Entity(**data)
-
-    def _mock_generate(self, task: Task, world_bible: WorldBible) -> Entity:
-        """High-fidelity mock generator for testing without internet."""
-        name = task.name
-        hint = task.hint or ""
-        name_lower = name.lower()
-
-        if any(w in name_lower for w in ["клан", "орден", "дружина", "clan", "order"]):
-            e_type = EntityType.FACTION
-            if "волхв" in name_lower or "ashen" in name_lower:
-                summary = f"{name} — древний орден северных чародеев и волхвов Нави."
-                facts = [f"{name} основан в 150 году у ледяного разлома.", f"{name} ведет войну с Орденом Паладинов."]
-                rels = [Relation(target="Орден Паладинов Рассвета", type="enemy_of", context="Священная вражда за земли")]
-            elif "дружина" in name_lower:
-                summary = f"{name} — рать витязей и защитников Порубежья."
-                facts = [f"{name} сформирована воеводой в 110 году.", f"{name} держит оборону на Заставе Яви."]
-                rels = [Relation(target="Застава Яви", type="located_in", context="Опорный пункт обороны")]
-            else:
-                summary = f"{name} — рыцарское братство защитников света."
-                facts = [f"{name} воздвиг башни света в 160 году.", f"{name} отражает набеги Нави."]
-                rels = [Relation(target="Древний Клан Волхвов", type="enemy_of", context="Борьба со стужей")]
-        elif any(w in name_lower for w in ["война", "битва", "осада", "war", "battle"]):
-            e_type = EntityType.HISTORICAL_EVENT
-            summary = f"{name} — тридцатилетний конфликт между волхвами и паладинами."
-            facts = [f"{name} началась в 200 году со штурма башен света."]
-            rels = [
-                Relation(target="Древний Клан Волхвов", type="participated_in", context="Атакующая сторона"),
-                Relation(target="Орден Паладинов Рассвета", type="participated_in", context="Обороняющаяся сторона"),
-            ]
-        elif any(w in name_lower for w in ["пустоши", "застава", "врата", "рубеж", "wastes", "gate"]):
-            e_type = EntityType.LOCATION
-            summary = f"{name} — укрепленный рубеж или территория на границе Яви и Нави."
-            facts = [f"{name} образовались в результате прорыва сил Нави."]
-            rels = [
-                Relation(target="Северная Дружина", type="located_in", context="Место несения дозора"),
-                Relation(target="Морозные Пустоши", type="adjacent_to", context="Граничит со стужей"),
-            ]
-        else:
-            e_type = EntityType.CHARACTER
-            summary = f"{name} — {hint.split('.')[0] if hint else 'хранитель рубежей, верный древним законам'}."
-            facts = [f"{name} пожертвовал частью жизненной силы ради защиты Яви в 115 году."]
-            rels = [
-                Relation(target="Северная Дружина", type="leader_of", context="Командует ратью"),
-                Relation(target="Застава Яви", type="located_in", context="Несет дозор на рубеже"),
-            ]
-
-        return Entity(
-            name=name,
-            entity_type=e_type,
-            summary=summary,
-            description=f"{summary} Неукоснительно блюдет законы эквивалентной жертвы мира '{world_bible.name}'.",
-            era="Первая Эпоха",
-            year=115,
-            facts=facts,
-            relations=rels,
-        )
-
-    def _mock_repair(self, entity: Entity, problems: List[str]) -> Entity:
-        """Removes violating phrases and adds sacrificial cost."""
-        clean_desc = entity.description
-        clean_desc = re.sub(r"(?:бессмертн\w*|вечн\w*)\s+(?:чародей|тиран|бог)", "смертный правитель", clean_desc, flags=re.IGNORECASE)
-        clean_desc += " За сотворенные чары была принесена священная жертва жизненной силы согласно законам мира."
-
-        clean_facts = [
-            re.sub(r"без\s+жертв\w*", "ценой великой жертвы", f, flags=re.IGNORECASE)
-            for f in entity.facts
-        ]
-
-        return Entity(
-            name=entity.name,
-            entity_type=entity.entity_type,
-            summary=entity.summary.replace("бессмертный", "доблестный"),
-            description=clean_desc,
-            era=entity.era,
-            year=entity.year,
-            facts=clean_facts,
-            relations=entity.relations,
         )
