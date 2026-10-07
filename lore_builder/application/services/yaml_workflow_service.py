@@ -39,6 +39,8 @@ class YamlWorkflowParser:
 
         return cls.parse_yaml(content, source_name=file_path)
 
+    parse_file = load_from_file
+
     @classmethod
     def parse_yaml(cls, yaml_content: str, source_name: str = "<string>") -> WorkflowConfigDTO:
         """Parses a YAML string into a strictly validated WorkflowConfigDTO."""

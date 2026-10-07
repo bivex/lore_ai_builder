@@ -70,73 +70,105 @@ class LoreDAGPlanner:
         nodes: List[LoreTaskNode] = []
         prompt_lower = prompt.lower()
 
+        is_cyrillic = any(ord(c) >= 0x0400 and ord(c) <= 0x04FF for c in prompt)
+
         # Check for Factions / Orders
-        if "clan" in prompt_lower or "necromancer" in prompt_lower or "faction" in prompt_lower:
+        if any(w in prompt_lower for w in ["clan", "necromancer", "faction", "клан", "некромант", "волхв", "фракци"]):
+            name = "Древний Клан Волхвов" if is_cyrillic else "The Northern Ashen Clan"
+            hint = (
+                "Тайный орден северных чародеев и волхвов Нави, черпающих морозную силу."
+                if is_cyrillic
+                else "Ancient necromantic clan dwelling in the boreal tundras, harvesting bone and soul-frost."
+            )
             nodes.append(
                 LoreTaskNode(
                     task_id="t_faction_1",
-                    name="The Northern Ashen Clan",
+                    name=name,
                     entity_type=EntityType.FACTION,
-                    prompt_hint="Ancient necromantic clan dwelling in the boreal tundras, harvesting bone and soul-frost.",
+                    prompt_hint=hint,
                     year=150,
-                    era="Second Age",
+                    era="Вторая Эпоха" if is_cyrillic else "Second Age",
                 )
             )
 
-        if "paladin" in prompt_lower or "sun" in prompt_lower or "order" in prompt_lower:
+        if any(w in prompt_lower for w in ["paladin", "sun", "order", "паладин", "солнц", "рассвет", "орден", "витяз"]):
+            name = "Орден Паладинов Рассвета" if is_cyrillic else "The Radiant Dawn Paladins"
+            hint = (
+                "Светлое рыцарское братство, охраняющее священные башни света."
+                if is_cyrillic
+                else "Solar knightly order guarding the holy ley towers against the necromancers."
+            )
             nodes.append(
                 LoreTaskNode(
                     task_id="t_faction_2",
-                    name="The Radiant Dawn Paladins",
+                    name=name,
                     entity_type=EntityType.FACTION,
-                    prompt_hint="Solar knightly order guarding the holy ley towers against the necromancers.",
+                    prompt_hint=hint,
                     year=160,
-                    era="Second Age",
+                    era="Вторая Эпоха" if is_cyrillic else "Second Age",
                 )
             )
 
         # Check for Conflicts / Wars
-        if "war" in prompt_lower or "feud" in prompt_lower or "battle" in prompt_lower:
+        if any(w in prompt_lower for w in ["war", "feud", "battle", "войн", "вражд", "битв"]):
             deps = [n.task_id for n in nodes if n.entity_type == EntityType.FACTION]
+            name = "Война Ледяного Затмения" if is_cyrillic else "The War of the Eclipse"
+            hint = (
+                "Жестокая тридцатилетняя война за контроль над северными рубежами."
+                if is_cyrillic
+                else "A bitter three-decade war where the Ashen Clan attempted to extinguish the Solar Tower."
+            )
             nodes.append(
                 LoreTaskNode(
                     task_id="t_event_1",
-                    name="The War of the Eclipse",
+                    name=name,
                     entity_type=EntityType.HISTORICAL_EVENT,
-                    prompt_hint="A bitter three-decade war where the Ashen Clan attempted to extinguish the Solar Tower.",
+                    prompt_hint=hint,
                     dependencies=deps,
                     year=200,
-                    era="Second Age",
+                    era="Вторая Эпоха" if is_cyrillic else "Second Age",
                 )
             )
 
         # Check for Artifacts / Relics
-        if "artifact" in prompt_lower or "relic" in prompt_lower or "blood" in prompt_lower:
-            faction_deps = [n.task_id for n in nodes if "Ashen" in n.name]
+        if any(w in prompt_lower for w in ["artifact", "relic", "blood", "артефакт", "реликви", "кров"]):
+            faction_deps = [n.task_id for n in nodes if "Ashen" in n.name or "Волхв" in n.name]
+            name = "Кровавый Реликварий" if is_cyrillic else "The Sanguine Reliquary"
+            hint = (
+                "Древний ларец с запечатанным сердцем первородного чародея."
+                if is_cyrillic
+                else "A forbidden dark iron chest containing the preserved heart of the First Necromancer."
+            )
             nodes.append(
                 LoreTaskNode(
                     task_id="t_artifact_1",
-                    name="The Sanguine Reliquary",
+                    name=name,
                     entity_type=EntityType.ARTIFACT,
-                    prompt_hint="A forbidden dark iron chest containing the preserved heart of the First Necromancer.",
+                    prompt_hint=hint,
                     dependencies=faction_deps or [nodes[0].task_id],
                     year=180,
-                    era="Second Age",
+                    era="Вторая Эпоха" if is_cyrillic else "Second Age",
                 )
             )
 
         # Check for Locations / Lands
-        if "land" in prompt_lower or "territory" in prompt_lower or "region" in prompt_lower:
+        if any(w in prompt_lower for w in ["land", "territory", "region", "земл", "территори", "регион", "пустош"]):
             event_deps = [n.task_id for n in nodes if n.entity_type == EntityType.HISTORICAL_EVENT]
+            name = "Морозные Пустоши Рубежа" if is_cyrillic else "The Frost-Blighted Wastes"
+            hint = (
+                "Изуродованная колдовской стужей северная тундра на границе с Навью."
+                if is_cyrillic
+                else "The scarred northern tundra poisoned by necromantic fallout following the war."
+            )
             nodes.append(
                 LoreTaskNode(
                     task_id="t_location_1",
-                    name="The Frost-Blighted Wastes",
+                    name=name,
                     entity_type=EntityType.LOCATION,
-                    prompt_hint="The scarred northern tundra poisoned by necromantic fallout following the war.",
+                    prompt_hint=hint,
                     dependencies=event_deps or ([n.task_id for n in nodes]),
                     year=230,
-                    era="Second Age",
+                    era="Вторая Эпоха" if is_cyrillic else "Second Age",
                 )
             )
 

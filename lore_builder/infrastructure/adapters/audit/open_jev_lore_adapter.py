@@ -86,17 +86,35 @@ class OpenJevLoreAdapter(JevDecisionPort):
             " ",
             text,
         )
+        cleaned = re.sub(
+            r"(?:бессмертн\w*|вечн\w*|неувядающ\w*)\s+(?:верност\w*|преданност\w*|любв\w*|дружб\w*|благодарност\w*|памят\w*|наследи\w*|слав\w*|подвиг\w*|клятв\w*|обет\w*|слов\w*|песн\w*)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         # 2. Strip antagonist phrases (hero fighting/slaying immortal foes)
         cleaned = re.sub(
             r"\b(?:fought|slayed|hunted|battled|opposed|defended\s+against|banished|survived)\s+(?:the\s+|an?\s+)?(?:immortal|undying)\b",
             " ",
             cleaned,
         )
+        cleaned = re.sub(
+            r"(?:сражал\w*|воевал\w*|убил\w*|сверг\w*|изгнал\w*|победил\w*|противостоял\w*|защищал\w*)\s+(?:\w+\s+)?(?:бессмертн\w*)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         # 3. Strip explicit negations
         cleaned = re.sub(
             r"\b(?:not|never|refused|denied|without\s+being)\s+(?:an?\s+)?(?:immortal|undying|divinity)\b",
             " ",
             cleaned,
+        )
+        cleaned = re.sub(
+            r"(?:не\s+был|не\s+стал|никогда\s+не|отказал\w*\s+от|без\s+того\s+чтобы\s+стать)\s+(?:бессмертн\w*|божеств\w*)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
         )
         # 4. Genuine violations
         actual_violations = [
@@ -105,17 +123,31 @@ class OpenJevLoreAdapter(JevDecisionPort):
             r"\b(?:cannot\s+die|never\s+dies|immune\s+to\s+death|defied\s+death\s+forever)\b",
             r"\bimmortal\s+(?:sorcerer|tyrant|king|emperor|warlord|ruler|being|mage)\b",
             r"\bundying\s+(?:sorcerer|tyrant|king|emperor|warlord|ruler|defier|abomination)\b",
+            r"(?:стал|обр[её]л|достиг|провозгласил\s+себя|стал\s+вечным)\s+(?:бессмертн\w*|божественност\w*|богом)",
+            r"(?:бессмертный|неумирающий)\s+(?:тиран|чародей|колдун|князь|владыка|правитель|маг)",
+            r"(?:не\s+может\s+умереть|никогда\s+не\s+умр[её]т|неуязвим\s+к\s+смерти|победил\s+смерть)",
+            r"истинн\w+\s+бессмерти\w+",
         ]
-        return any(re.search(pat, cleaned) for pat in actual_violations)
+        return any(re.search(pat, cleaned, flags=re.IGNORECASE) for pat in actual_violations)
 
     @staticmethod
     def _is_true_sacrifice_violation(text: str) -> bool:
         """Distinguishes magic without cost from beneficiary descriptions (e.g. 'without cost to the villagers') and actual sacrifices."""
-        has_explicit_sacrifice = bool(re.search(
-            r"\b(?:sacrificing|sacrificed|gave\s+up|paid\s+with|burnt|lost\s+his|lost\s+her|offered\s+his|offered\s+her)\b",
-            text
-        ))
-        if has_explicit_sacrifice and not re.search(r"\b(?:infinite|unlimited)\s+(?:magic|mana|spells?)\s+without\s+sacrifice\b", text):
+        has_explicit_sacrifice = bool(
+            re.search(
+                r"\b(?:sacrificing|sacrificed|gave\s+up|paid\s+with|burnt|lost\s+his|lost\s+her|offered\s+his|offered\s+her)\b",
+                text,
+            )
+            or re.search(
+                r"(?:пожертвова\w*|отдал\w*\s+жизнь|заплатил\w*\s+кровью|прин[её]с\w*\s+в\s+жертву|отдал\w*\s+часть)",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        if has_explicit_sacrifice and not (
+            re.search(r"\b(?:infinite|unlimited)\s+(?:magic|mana|spells?)\s+without\s+sacrifice\b", text)
+            or re.search(r"бесконечн\w*\s+маги\w*\s+без\s+жертв\w*", text, flags=re.IGNORECASE)
+        ):
             return False
 
         cleaned = re.sub(
@@ -124,9 +156,21 @@ class OpenJevLoreAdapter(JevDecisionPort):
             text,
         )
         cleaned = re.sub(
+            r"без\s+(?:платы|жертв\w*|ущерба)\s+(?:для\s+)?(?:крестьян|народа|людей|жителей|земель|других|горожан)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
             r"\b(?:not|never|no\s+\w+)\s+(?:without\s+cost|without\s+sacrifice)\b",
             " ",
             cleaned,
+        )
+        cleaned = re.sub(
+            r"(?:не|никогда\s+не)\s+(?:без\s+платы|без\s+жертв\w*)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
         )
 
         violation_patterns = [
@@ -136,23 +180,36 @@ class OpenJevLoreAdapter(JevDecisionPort):
             r"\bcast\s+infinite\s+magic\b",
             r"\bwithout\s+cost\s+or\s+sacrifice\b",
             r"\bwithout\s+sacrifice\s+or\s+cost\b",
+            r"(?:творил|сотворил|использовал|применял|колдовал|кастовал)\s+(?:магию|заклинания|чары)\s+без\s+(?:жертв\w*|платы|цены)",
+            r"(?:магия|колдовство|чары)\s+без\s+(?:жертв\w*|платы|цены)",
+            r"бесконечн\w*\s+(?:маги\w*|сил\w*|чар\w*)\s+без\s+(?:жертв\w*|платы|цены)",
+            r"без\s+(?:жертвы|платы)\s+и\s+(?:платы|жертвы)",
         ]
-        return any(re.search(pat, cleaned) for pat in violation_patterns)
+        return any(re.search(pat, cleaned, flags=re.IGNORECASE) for pat in violation_patterns)
 
     @staticmethod
     def _is_true_void_violation(text: str) -> bool:
         """Detects whether entity claimed to permanently seal a void rift instead of diverting it."""
-        if re.search(r"\b(?:diverted|redirected|channeled\s+away)\s+(?:the\s+)?(?:void|rift)\b", text):
-            if not re.search(r"\b(?:permanently|completely)\s+sealed\s+(?:the\s+)?(?:void|rift)\b", text):
+        if re.search(r"\b(?:diverted|redirected|channeled\s+away)\s+(?:the\s+)?(?:void|rift)\b", text) or re.search(
+            r"(?:отв[её]л|перенаправил|сдержал)\s+(?:прорыв|разлом|врата)", text, flags=re.IGNORECASE
+        ):
+            if not (
+                re.search(r"\b(?:permanently|completely)\s+sealed\s+(?:the\s+)?(?:void|rift)\b", text)
+                or re.search(r"(?:навсегда|полностью)\s+(?:запечатал|закрыл)\s+(?:прорыв|разлом|врата)", text, flags=re.IGNORECASE)
+            ):
                 return False
-        if re.search(r"\b(?:failed\s+to\s+seal|could\s+not\s+seal|attempted\s+to\s+seal\s+.*but\s+failed)\b", text):
+        if re.search(r"\b(?:failed\s+to\s+seal|could\s+not\s+seal|attempted\s+to\s+seal\s+.*but\s+failed)\b", text) or re.search(
+            r"(?:не\s+смог\s+запечатать|пытался\s+запечатать.*но\s+не\s+смог)", text, flags=re.IGNORECASE
+        ):
             return False
         violation_patterns = [
             r"\b(?:permanently|completely|successfully)\s+(?:sealed|closed)\s+(?:the\s+)?(?:void|rift)\b",
             r"\b(?:sealed|closed)\s+(?:the\s+)?(?:void|rift)\s+(?:forever|permanently|completely)\b",
             r"\bsealed\s+the\s+void\s+(?:breach|rift)\b",
+            r"(?:навсегда|полностью|навечно)\s+(?:запечатал|закрыл)\s+(?:прорыв|разлом|врата)",
+            r"(?:запечатал|закрыл)\s+(?:прорыв|разлом|врата)\s+(?:навсегда|навечно)",
         ]
-        return any(re.search(pat, text) for pat in violation_patterns)
+        return any(re.search(pat, text, flags=re.IGNORECASE) for pat in violation_patterns)
 
     def evaluate_axiom_compliance(
         self,
@@ -173,23 +230,26 @@ class OpenJevLoreAdapter(JevDecisionPort):
         violation_indicators = []
 
         # 1. Magic Law / Conservation / Sacrifice Axiom
-        if "sacrifice" in rule_lower:
+        if any(w in rule_lower for w in ["sacrifice", "жертв", "плат"]):
             if self._is_true_sacrifice_violation(narrative_lower):
                 violation_indicators.append(0.97)
 
         # 2. Mortality Axiom
-        if "mortal" in rule_lower or "cannot become immortal" in rule_lower or "mortal coil" in rule_lower or "cannot achieve true divinity" in rule_lower:
+        if any(w in rule_lower for w in ["mortal", "cannot become immortal", "mortal coil", "cannot achieve true divinity", "смертн", "бессмерт", "божеств"]):
             if self._is_true_mortality_violation(narrative_lower):
                 violation_indicators.append(0.98)
 
         # 3. Void / Sealed Realm Axioms
-        if "cannot be sealed" in rule_lower or "unsealable" in rule_lower:
+        if any(w in rule_lower for w in ["cannot be sealed", "unsealable", "не могут быть закрыты", "нельзя запечатать", "не могут быть запечатаны"]):
             if self._is_true_void_violation(narrative_lower):
                 violation_indicators.append(0.95)
 
         # 4. Temporal Unidirectional Axiom
-        if "cannot alter past" in rule_lower or "time flows forward" in rule_lower:
-            if re.search(r"\b(?:traveled\s+back\s+in\s+time|altered\s+the\s+past|reversed\s+time|changed\s+history)\b", narrative_lower):
+        if any(w in rule_lower for w in ["cannot alter past", "time flows forward", "нельзя изменить прошлое", "время течет", "необратимо"]):
+            if (
+                re.search(r"\b(?:traveled\s+back\s+in\s+time|altered\s+the\s+past|reversed\s+time|changed\s+history)\b", narrative_lower)
+                or re.search(r"(?:изменил\s+прошлое|повернул\s+время\s+вспять|отправился\s+в\s+прошлое)", narrative_lower)
+            ):
                 violation_indicators.append(0.96)
 
         if violation_indicators:
@@ -297,23 +357,43 @@ class OpenJevLoreAdapter(JevDecisionPort):
             if r_lower in context_lower or r_lower.replace("_", " ") in context_lower:
                 scores[r] += 3.0
             if any(term in r_lower for term in ["leader", "ruler", "commander", "governor"]) and any(
-                w in context_lower for w in ["commands", "leads", "ruler", "guided", "directs", "supreme", "commander of", "head of"]
+                w in context_lower
+                for w in [
+                    "commands", "leads", "ruler", "guided", "directs", "supreme", "commander of", "head of",
+                    "командует", "возглавляет", "правит", "князь", "воевода", "предводитель", "повелевает", "глава",
+                ]
             ):
                 scores[r] += 3.5
             if any(term in r_lower for term in ["enemy", "hostile", "nemesis", "foe", "opposes"]) and any(
-                w in context_lower for w in ["war against", "fought against", "feud", "slain by", "opposed", "nemesis of", "bitter enemy"]
+                w in context_lower
+                for w in [
+                    "war against", "fought against", "feud", "slain by", "opposed", "nemesis of", "bitter enemy",
+                    "война", "враг", "сражался с", "воевал против", "заклятый враг", "ненавидит", "противостоит",
+                ]
             ):
                 scores[r] += 3.0
             if any(term in r_lower for term in ["allied", "friend", "sworn", "treaty", "member"]) and any(
-                w in context_lower for w in ["allied with", "sworn brother", "pact", "comrade", "served alongside", "member of", "brotherhood", "allied"]
+                w in context_lower
+                for w in [
+                    "allied with", "sworn brother", "pact", "comrade", "served alongside", "member of", "brotherhood", "allied",
+                    "союзник", "побратим", "поклялся в верности", "дружина", "братство", "орден", "союз", "верный",
+                ]
             ):
                 scores[r] += 2.8
             if any(term in r_lower for term in ["located", "dwelling", "stationed", "resides"]) and any(
-                w in context_lower for w in ["dwells in", "stationed at", "fortress of", "realm of", "inhabits", "located in"]
+                w in context_lower
+                for w in [
+                    "dwells in", "stationed at", "fortress of", "realm of", "inhabits", "located in",
+                    "обитает в", "крепость", "расположен в", "находится в", "земли", "рубеж", "дозор",
+                ]
             ):
                 scores[r] += 2.8
             if any(term in r_lower for term in ["worships", "devoted", "priest"]) and any(
-                w in context_lower for w in ["temple", "prayer", "worships", "deity", "god of", "vow to", "sacred"]
+                w in context_lower
+                for w in [
+                    "temple", "prayer", "worships", "deity", "god of", "vow to", "sacred",
+                    "храм", "молитва", "поклоняется", "божество", "бог", "святилище", "волхв", "жрец",
+                ]
             ):
                 scores[r] += 2.8
 
@@ -350,17 +430,44 @@ class OpenJevLoreAdapter(JevDecisionPort):
         for r in candidate_relations:
             if r in context_lower:
                 scores[r] += 2.0
-            if r == "before" and any(w in context_lower for w in ["prior to", "before", "preceded", "dawn age", "ancient past"]):
+            if r == "before" and any(
+                w in context_lower
+                for w in [
+                    "prior to", "before", "preceded", "dawn age", "ancient past",
+                    "до", "ранее", "предшествовал", "предшествовала", "древние времена", "за века до",
+                ]
+            ):
                 scores[r] += 2.4
-            if r == "after" and any(w in context_lower for w in ["after", "following", "later", "subsequent", "centuries after"]):
+            if r == "after" and any(
+                w in context_lower
+                for w in [
+                    "after", "following", "later", "subsequent", "centuries after",
+                    "после", "спустя", "позже", "века спустя", "вслед за",
+                ]
+            ):
                 scores[r] += 2.4
-            if r == "during" and any(w in context_lower for w in ["during", "throughout", "in the reign of", "in the year", "amidst"]):
+            if r == "during" and any(
+                w in context_lower
+                for w in [
+                    "during", "throughout", "in the reign of", "in the year", "amidst",
+                    "во время", "в эпоху", "в период", "в годы", "на протяжении", "пока",
+                ]
+            ):
                 scores[r] += 2.3
-            if r == "meets" and any(w in context_lower for w in ["immediately prior", "until the fall", "right up to"]):
+            if r == "meets" and any(
+                w in context_lower
+                for w in ["immediately prior", "until the fall", "right up to", "вплоть до", "непосредственно перед"]
+            ):
                 scores[r] += 2.2
-            if r == "equals" and any(w in context_lower for w in ["exact same time", "coeval", "synchronous", "contemporary"]):
+            if r == "equals" and any(
+                w in context_lower
+                for w in ["exact same time", "coeval", "synchronous", "contemporary", "одновременно", "в то же самое время", "синхронно"]
+            ):
                 scores[r] += 2.2
-            if r == "overlaps" and any(w in context_lower for w in ["partially coincided", "overlapped with"]):
+            if r == "overlaps" and any(
+                w in context_lower
+                for w in ["partially coincided", "overlapped with", "частично совпало", "пересекалось"]
+            ):
                 scores[r] += 2.2
 
         exp_vals = {r: math.exp(s / self.temperature) for r, s in scores.items()}

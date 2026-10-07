@@ -192,3 +192,73 @@ tasks:
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+def test_russian_yaml_workflow_execution():
+    """Validates full execution of Russian declarative YAML configuration with dark Slavic fantasy lore."""
+    config_path = "configs/tasks_ru.yml"
+    assert os.path.exists(config_path), "configs/tasks_ru.yml should exist"
+
+    workflow = YamlWorkflowParser.parse_file(config_path)
+    assert workflow.world.name == "Северное Порубежье: Явь и Навь"
+    assert len(workflow.world.immutable_laws) == 3
+    assert len(workflow.tasks) == 8
+
+    memory = InMemoryLoreMemoryAdapter()
+    resources = JobObjectsResourceAdapter()
+    events = InMemoryEventPublisherAdapter()
+    llm = MockLLMAdapter(should_violate_canon=False)
+    jev = OpenJevLoreAdapter()
+
+    auditor = AuditEntityUseCase(memory_port=memory, event_publisher=events, jev_port=jev)
+    generator = GenerateEntityUseCase(
+        memory_port=memory,
+        resource_controller=resources,
+        llm_provider=llm,
+        event_publisher=events,
+        audit_use_case=auditor,
+    )
+    orchestrator = OrchestrateSwarmUseCase(
+        memory_port=memory,
+        resource_controller=resources,
+        llm_provider=llm,
+        event_publisher=events,
+        jev_port=jev,
+        audit_use_case=auditor,
+    )
+    executor = ExecuteWorkflowUseCase(
+        memory_port=memory,
+        generator=generator,
+        orchestrator=orchestrator,
+        auditor=auditor,
+        jev_port=jev,
+    )
+
+    res = executor.execute(workflow)
+    assert res.total_tasks == 8
+    assert res.successful_tasks == 8
+    assert res.failed_tasks == 0
+
+    # Task 1: Generate
+    t1 = res.task_results[0]["result"]
+    assert t1["entity_name"] == "Воевода Радомир"
+    assert t1["status"] == "canonical"
+
+    # Task 3: Audit valid (metaphorical undying loyalty)
+    t3 = res.task_results[2]["result"]
+    assert t3["verdict"] == "APPROVE"
+    assert t3["p_compliant"] > 0.9
+
+    # Task 4: Audit violating (immortal tyrant infinite magic)
+    t4 = res.task_results[3]["result"]
+    assert t4["verdict"] == "REJECT_AXIOM_VIOLATION"
+    assert t4["p_compliant"] < 0.1
+
+    # Task 5: Classify relation
+    t5 = res.task_results[4]["result"]
+    assert t5["chosen_relation"] == "ruler_of"
+
+    # Task 6: Temporal
+    t6 = res.task_results[5]["result"]
+    assert t6["allen_relation"] == "before"
+
