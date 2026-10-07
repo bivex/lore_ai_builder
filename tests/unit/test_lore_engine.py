@@ -3,7 +3,18 @@ import json
 import tempfile
 import pytest
 
-from lore_engine.models import Entity, Relation, Task, WorldBible, EntityType
+from lore_engine.models import (
+    Entity,
+    Relation,
+    RelationType,
+    Task,
+    WorldBible,
+    EntityType,
+    Verdict,
+    Violation,
+    ProseVerification,
+    AtomicFact,
+)
 from lore_engine.store import LoreStore
 from lore_engine.judge import LoreJudge
 from lore_engine.llm import LoreLLMClient
@@ -90,7 +101,8 @@ def test_lore_store_sqlite_crud_and_json_export():
 
 
 def test_judge_canon_audit_and_false_positives():
-    judge = LoreJudge()
+    llm = LoreLLMClient(use_mock=True)
+    judge = LoreJudge(llm_client=llm)
     world = WorldBible(
         name="Явь и Навь",
         immutable_laws=[
@@ -113,7 +125,24 @@ def test_judge_canon_audit_and_false_positives():
     problems = judge.audit(valid_ent, world)
     assert len(problems) == 0, f"Expected 0 problems, got: {problems}"
 
-    # 2. Invalid entity: true immortality and free magic
+    # 2. Invalid entity: true immortality and free magic (injected via structured Verdict fixture)
+    llm.set_mock_verdict("Кощей Пустотный", Verdict(
+        is_valid=False,
+        violations=[
+            Violation(
+                axiom=world.immutable_laws[1],
+                quote="Бессмертный чародей Нави... провозгласил себя вечным богом",
+                explanation="Сущность заявляет бессмертие вопреки аксиоме о смертности",
+                severity="canon_breaking",
+            ),
+            Violation(
+                axiom=world.immutable_laws[0],
+                quote="Творил бесконечную магию без жертвы",
+                explanation="Использование магии без жертвы нарушает закон сохранения чар",
+                severity="canon_breaking",
+            ),
+        ]
+    ))
     invalid_ent = Entity(
         name="Кощей Пустотный",
         entity_type=EntityType.CHARACTER,
@@ -264,8 +293,8 @@ def test_two_stage_facts_first_pipeline_and_alias_resolution():
         problems_lifespan = judge.audit(old_char, world)
         assert any("срока жизни" in p for p in problems_lifespan)
 
-        # 3. Test predecessor relation check (enemy_of for predecessor)
-        predecessor_ent = Entity(
+        # 3. Test invalid relation type check (rejected by closed RelationType enum)
+        invalid_rel_ent = Entity(
             name="Воевода Радомир",
             entity_type=EntityType.CHARACTER,
             summary="Воевода",
@@ -273,11 +302,11 @@ def test_two_stage_facts_first_pipeline_and_alias_resolution():
             year=338,
             facts=["338 год: Принял командование."],
             relations=[
-                Relation(target="Воевода Ксения", type="enemy_of", context="Погибшая предшественница воеводы"),
+                Relation(target="Воевода Ксения", type="invented_relation", context="Погибшая предшественница воеводы"),
             ],
         )
-        problems_pred = judge.audit(predecessor_ent, world)
-        assert any("predecessor_of" in p for p in problems_pred)
+        problems_pred = judge.audit(invalid_rel_ent, world)
+        assert any("Недопустимый тип связи" in p for p in problems_pred)
 
         # 4. Test L0 conversation recording and results export
         engine = AutonomousLoreEngine(
@@ -612,3 +641,166 @@ def test_facts_table_structured_fields_and_audit_export():
     finally:
         if os.path.exists(db_path):
             os.remove(db_path)
+
+
+def test_sql_allowed_relations_matrix_query():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        db_path = tf.name
+
+    try:
+        store = LoreStore(db_path=db_path)
+
+        # 1. Commit location and faction
+        loc = Entity(
+            name="Каменная Глыба",
+            entity_type=EntityType.LOCATION,
+            summary="Скала",
+            description="Утёс",
+            facts=["100 год: Стоит скала."],
+            relations=[
+                Relation(target="Северная Дружина", type="possesses", context="Скала владеет дружиной"),
+            ],
+        )
+        faction = Entity(
+            name="Северная Дружина",
+            entity_type=EntityType.FACTION,
+            summary="Дружина",
+            description="Рать",
+            facts=["100 год: Собрана дружина."],
+            relations=[],
+        )
+        store.commit_entity(loc)
+        store.commit_entity(faction)
+
+        # Location possesses Faction is NOT in allowed_relations
+        violations = store.check_invalid_relations_sql("Каменная Глыба")
+        assert len(violations) >= 1
+        assert any("Онтологическая ошибка в связях (SQL)" in v for v in violations)
+        assert any("possesses" in v for v in violations)
+
+        # 2. Valid relation: Character leader_of Faction
+        char = Entity(
+            name="Воевода Радомир",
+            entity_type=EntityType.CHARACTER,
+            summary="Воевода",
+            description="Лидер",
+            facts=["110 год: Возглавил дружину."],
+            relations=[
+                Relation(target="Северная Дружина", type="leader_of", context="Командует"),
+            ],
+        )
+        store.commit_entity(char)
+        char_violations = store.check_invalid_relations_sql("Воевода Радомир")
+        assert len(char_violations) == 0
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+def test_sql_character_lifespan_query():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        db_path = tf.name
+
+    try:
+        store = LoreStore(db_path=db_path)
+
+        # Character with facts spanning 150 years (100 to 250)
+        old_char = Entity(
+            name="Старец Добрыня",
+            entity_type=EntityType.CHARACTER,
+            summary="Старец",
+            description="Воин",
+            year=100,
+            facts=["100 год: Родился.", "250 год: Всё ещё жив."],
+            atomic_facts=[
+                AtomicFact(year=100, era="Первая Эпоха", statement="100 год: Родился.", participants=["Старец Добрыня"]),
+                AtomicFact(year=250, era="Первая Эпоха", statement="250 год: Всё ещё жив.", participants=["Старец Добрыня"]),
+            ],
+            relations=[],
+        )
+        store.commit_entity(old_char)
+
+        # SQL query should identify span > 120
+        lifespan_issues = store.check_lifespan_violations_sql("Старец Добрыня")
+        assert len(lifespan_issues) == 1
+        assert "Нарушение срока жизни смертного персонажа (SQL)" in lifespan_issues[0]
+        assert "150 лет" in lifespan_issues[0]
+
+        # Normal mortal character (span 50 years)
+        mortal_char = Entity(
+            name="Ратмир Младший",
+            entity_type=EntityType.CHARACTER,
+            summary="Молодой ратник",
+            description="Воин",
+            year=100,
+            facts=["100 год: Родился.", "150 год: Пал в битве."],
+            atomic_facts=[
+                AtomicFact(year=100, era="Первая Эпоха", statement="100 год: Родился.", participants=["Ратмир Младший"]),
+                AtomicFact(year=150, era="Первая Эпоха", statement="150 год: Пал в битве.", participants=["Ратмир Младший"]),
+            ],
+            relations=[],
+        )
+        store.commit_entity(mortal_char)
+        assert len(store.check_lifespan_violations_sql("Ратмир Младший")) == 0
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+def test_morphological_alias_resolution_and_deduplication():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        db_path = tf.name
+
+    try:
+        store = LoreStore(db_path=db_path)
+        ent = Entity(
+            name="Воевода Ксения",
+            entity_type=EntityType.CHARACTER,
+            summary="Воевода рубежа",
+            description="Защитница",
+            year=315,
+            facts=["315 год: Встала на защиту Заставы."],
+            relations=[],
+        )
+        store.commit_entity(ent)
+
+        # Russian case declensions resolve to normal_form lemma
+        assert store.resolve_canonical_name("Ксении") == "Воевода Ксения"
+        assert store.resolve_canonical_name("Ксению") == "Воевода Ксения"
+        assert store.resolve_canonical_name("Ксенией") == "Воевода Ксения"
+        assert store.resolve_canonical_name("Воеводе Ксении") == "Воевода Ксения"
+
+        # Distinct names are NOT falsely merged
+        assert store.resolve_canonical_name("Радик") == "Радик"
+        assert store.resolve_canonical_name("Радим") == "Радим"
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+def test_prose_verification_semantic_audit():
+    llm = LoreLLMClient(use_mock=True)
+    judge = LoreJudge(llm_client=llm)
+    world = WorldBible()
+
+    ent = Entity(
+        name="Кузнец Вараг",
+        entity_type=EntityType.CHARACTER,
+        summary="Кузнец выковал паровой двигатель с часовыми шестернями.",
+        description="Собрал механическую колесницу.",
+        year=325,
+        facts=["325 год: Выковал рунный молот."],
+        relations=[],
+    )
+
+    # In mock mode, inject prose verification result with style issue and ungrounded claim
+    llm.set_mock_prose_verification("Кузнец Вараг", ProseVerification(
+        is_supported=False,
+        unsupported_claims=["Собрал механическую колесницу"],
+        style_issues=["Обнаружен техно-анахронизм: шестерни и паровой двигатель"],
+    ))
+
+    problems = judge.audit_prose(ent, world)
+    assert len(problems) == 2
+    assert any("Неподтверждённое утверждение" in p for p in problems)
+    assert any("Стилистическое замечание" in p for p in problems)

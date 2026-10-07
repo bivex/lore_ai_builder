@@ -1,6 +1,6 @@
 import logging
 from typing import List, Optional, Any
-from .models import Entity, EntityFactsDraft, WorldBible, EntityType, Verdict
+from .models import Entity, EntityFactsDraft, WorldBible, EntityType, RelationType, Verdict, ProseVerification
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,25 @@ class LoreJudge:
         )
         return self.audit(temp_entity, world_bible, context)
 
+    def audit_prose(self, entity: Entity, world_bible: WorldBible) -> List[str]:
+        """Dedicated LLM semantic pass checking for unsupported claims or style/tone anachronisms in prose."""
+        client = self.llm_client
+        if client is None:
+            from .llm import LoreLLMClient
+            client = LoreLLMClient(use_mock=True)
+
+        try:
+            res: ProseVerification = client.verify_prose_support(entity, world_bible)
+            problems = []
+            for claim in res.unsupported_claims:
+                problems.append(f"Неподтверждённое утверждение в художественной прозе: '{claim}' (отсутствует в фактах)")
+            for issue in res.style_issues:
+                problems.append(f"Стилистическое замечание к прозе: '{issue}'")
+            return problems
+        except Exception as e:
+            logger.warning(f"Semantic prose verification error: {e}")
+            return []
+
     def audit(self, entity: Entity, world_bible: WorldBible, context: str = "") -> List[str]:
         """Audits the proposed entity against World Bible laws and graph constraints.
         Returns actionable problems for repair if violations are severe or canon-breaking.
@@ -105,13 +124,13 @@ class LoreJudge:
                 problems.append(f"Дублирующаяся связь: {rel.type} -> {rel.target}")
             seen_rels.add(key)
 
-        # 3. Predecessor relation check (enemy_of vs predecessor_of)
+        # 3. Closed Enum Relation Type check (context is purely human narrative, never parsed for keywords)
+        valid_rel_types = {rt.value for rt in RelationType}
         for rel in entity.relations:
-            ctx_lower = rel.context.casefold()
-            if rel.type.casefold() == "enemy_of" and any(w in ctx_lower for w in ["предшественник", "предшественниц", "бывшая воевода", "бывший воевода"]):
+            r_type = rel.type.strip().lower()
+            if r_type not in valid_rel_types:
                 problems.append(
-                    f"Недопустимая связь 'enemy_of' для предшественника '{rel.target}'. "
-                    f"Для павших предшественников используйте тип связи 'predecessor_of', если не было предательства."
+                    f"Недопустимый тип связи '{rel.type}'. Разрешенные типы: {sorted(list(valid_rel_types))}."
                 )
 
         # 4. Ontological relation rules: source constraints & semantic heuristic targets
@@ -222,21 +241,7 @@ class LoreJudge:
             return problems
 
         with self.store._get_conn() as conn:
-            # 1. Check existing entities with same core name (Dynasty / Name reuse across centuries)
-            if entity.entity_type == EntityType.CHARACTER:
-                existing_same_name = conn.execute(
-                    "SELECT year, era FROM entities WHERE py_lower(TRIM(name)) = ? AND entity_type = 'character'",
-                    (entity.name.strip().casefold(),)
-                ).fetchone()
-                if existing_same_name and existing_same_name["year"] is not None:
-                    diff = abs(entity.year - existing_same_name["year"])
-                    if diff > 150:
-                        problems.append(
-                            f"Тот же смертный персонаж '{entity.name}' уже зафиксирован в {existing_same_name['year']} г. "
-                            f"(разница {diff} лет). Если это потомок, добавьте нумерацию (напр., '{entity.name} II') или укажите смену поколений."
-                        )
-
-            # 2. Check relations targets and graph ontological matrix
+            # 1. SQL Allowed Relations check
             for rel in entity.relations:
                 resolved_target = rel.target
                 if hasattr(self.store, "resolve_canonical_name"):
@@ -246,39 +251,31 @@ class LoreJudge:
                     "SELECT year, era, entity_type FROM entities WHERE py_lower(TRIM(name)) = ?",
                     (resolved_target.strip().casefold(),)
                 ).fetchone()
-                if target_row:
-                    target_e_type_str = target_row["entity_type"]
-                    target_e_type = None
-                    if target_e_type_str:
-                        for m in EntityType:
-                            if m.value == target_e_type_str.lower():
-                                target_e_type = m
-                                break
 
-                    # Graph ontological rules verification
-                    if target_e_type:
-                        r_type = rel.type.strip().lower()
-                        if r_type in ONTOLOGICAL_RELATION_RULES:
-                            rule = ONTOLOGICAL_RELATION_RULES[r_type]
-                            if "valid_targets" in rule and target_e_type not in rule["valid_targets"]:
-                                valid_names = [t.value for t in rule["valid_targets"]]
-                                problems.append(
-                                    f"Онтологическая ошибка в графе: отношение '{rel.type}' к '{resolved_target}' ({target_e_type.value}) "
-                                    f"недопустимо. Допустимые типы цели: {valid_names}."
-                                )
-                            if rule.get("same_type") and entity.entity_type != target_e_type:
-                                problems.append(
-                                    f"Онтологическая ошибка в графе: отношение '{rel.type}' между '{entity.name}' ({entity.entity_type.value}) "
-                                    f"и '{resolved_target}' ({target_e_type.value}) недопустимо (требуется одинаковый тип сущностей)."
-                                )
+                if target_row and target_row["entity_type"]:
+                    t_type = target_row["entity_type"]
+                    allowed = conn.execute(
+                        "SELECT 1 FROM allowed_relations WHERE src_type = ? AND rel_type = ? AND dst_type = ?",
+                        (entity.entity_type.value, rel.type.lower().strip(), t_type.lower().strip())
+                    ).fetchone()
+                    if not allowed:
+                        problems.append(
+                            f"Онтологическая ошибка в связях (SQL): связь '{rel.type}' между "
+                            f"'{entity.name}' ({entity.entity_type.value}) и '{resolved_target}' ({t_type}) недопустима."
+                        )
 
                     # Mortal character vs historical event lifespan sanity check
                     if target_row["year"] is not None:
-                        if entity.entity_type == EntityType.CHARACTER and target_row["entity_type"] == "historical_event":
+                        if entity.entity_type == EntityType.CHARACTER and t_type == "historical_event":
                             diff = abs(entity.year - target_row["year"])
                             if diff > 150:
                                 problems.append(
                                     f"Временной парадокс в графе: смертный персонаж {entity.name} ({entity.year} г.) "
                                     f"связан с событием {resolved_target} ({target_row['year']} г.), разница {diff} лет."
                                 )
+
+            # 2. Check existing character lifespan in SQL
+            if entity.entity_type == EntityType.CHARACTER and hasattr(self.store, "check_lifespan_violations_sql"):
+                problems.extend(self.store.check_lifespan_violations_sql(entity.name))
+
         return problems

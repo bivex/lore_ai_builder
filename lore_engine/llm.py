@@ -3,11 +3,14 @@ import json
 import logging
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
+import instructor
+import json_repair
 from openai import OpenAI
 
 from .models import (
     Entity,
     Relation,
+    RelationType,
     Task,
     WorldBible,
     EntityType,
@@ -15,6 +18,7 @@ from .models import (
     Verdict,
     AtomicFact,
     EntityFactsDraft,
+    ProseVerification,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,10 +45,25 @@ class LoreLLMClient:
         self.base_url = base_url or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.model = model or os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
+        self.mock_verdicts: Dict[str, Verdict] = {}
+        self._mock_verdicts = self.mock_verdicts
+        self.mock_prose_verifications: Dict[str, ProseVerification] = {}
+        self._mock_prose_verifications = self.mock_prose_verifications
+
         if not self.use_mock:
-            self._client = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
+            self._raw_client = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
+            self._client = instructor.from_openai(self._raw_client)
         else:
+            self._raw_client = None
             self._client = None
+
+    def set_mock_verdict(self, entity_name: str, verdict: Verdict) -> None:
+        """Injects a predetermined mock Verdict for an entity (for tests/offline testing)."""
+        self._mock_verdicts[entity_name.strip().casefold()] = verdict
+
+    def set_mock_prose_verification(self, entity_name: str, verification: ProseVerification) -> None:
+        """Injects a predetermined mock ProseVerification for an entity."""
+        self._mock_prose_verifications[entity_name.strip().casefold()] = verification
 
     # =========================================================================
     # STAGE 1: FACTS-FIRST DRAFT GENERATION
@@ -103,6 +122,23 @@ class LoreLLMClient:
             f"Глубина в графе: {task.depth}"
         )
 
+        if self._client:
+            try:
+                draft: EntityFactsDraft = self._client.chat.completions.create(
+                    model=self.model,
+                    response_model=EntityFactsDraft,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_retries=2,
+                )
+                if not draft.name:
+                    draft.name = task.name
+                return draft
+            except Exception as e:
+                logger.warning(f"Instructor structured draft completion fallback to raw call: {e}")
+
         raw = self._call_llm(system_prompt, user_prompt)
         return self._parse_facts_draft_json(raw, task.name)
 
@@ -130,6 +166,23 @@ class LoreLLMClient:
             "ЗАМЕЧАНИЯ АУДИТА:\n" + "\n".join(f"- {p}" for p in problems) + "\n\n"
             "Исправь факты, даты и типы связей в соответствии с замечаниями."
         )
+
+        if self._client:
+            try:
+                repaired: EntityFactsDraft = self._client.chat.completions.create(
+                    model=self.model,
+                    response_model=EntityFactsDraft,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_retries=2,
+                )
+                if not repaired.name:
+                    repaired.name = draft.name
+                return repaired
+            except Exception as e:
+                logger.warning(f"Instructor repair completion fallback to raw call: {e}")
 
         raw = self._call_llm(system_prompt, user_prompt)
         return self._parse_facts_draft_json(raw, draft.name)
@@ -251,8 +304,75 @@ class LoreLLMClient:
             f"Факты:\n" + "\n".join(f"- {f}" for f in entity.facts)
         )
 
+        if self._client:
+            try:
+                verdict: Verdict = self._client.chat.completions.create(
+                    model=self.model,
+                    response_model=Verdict,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_retries=2,
+                )
+                return verdict
+            except Exception as e:
+                logger.warning(f"Instructor audit completion fallback to raw call: {e}")
+
         raw = self._call_llm(system_prompt, user_prompt)
         return self._parse_verdict_json(raw)
+
+    def verify_prose_support(self, entity: Entity, world_bible: WorldBible) -> ProseVerification:
+        """Dedicated LLM semantic pass checking that prose is grounded in facts and adheres to style."""
+        if self.use_mock:
+            name_cf = entity.name.strip().casefold()
+            if name_cf in self._mock_prose_verifications:
+                return self._mock_prose_verifications[name_cf]
+            return ProseVerification(is_supported=True, unsupported_claims=[], style_issues=[])
+
+        facts_text = "\n".join(f"- {f}" for f in entity.facts)
+        system_prompt = (
+            f"Ты — строгий логический верификатор канона вселенной '{world_bible.name}'.\n"
+            "Твоя задача — проверить художественную прозу (саммари и описание) сущности на 2 критерия:\n"
+            "1. Неподтверждённые утверждения: содержит ли проза НОВЫЕ исторические факты, числа, даты, события или артефакты, которых НЕТ в утверждённых фактах.\n"
+            "2. Стилистические нарушения: содержит ли текст техно-анахронизмы (шестерёнки, механизмы, часы, паровые двигатели) или выдуманные псевдо-славянские слова-галлюцинации.\n\n"
+            "Верни ИСКЛЮЧИТЕЛЬНО валидный JSON схемы ProseVerification:\n"
+            "{\n"
+            '  "is_supported": true,\n'
+            '  "unsupported_claims": [],\n'
+            '  "style_issues": []\n'
+            "}"
+        )
+        user_prompt = (
+            f"СУЩНОСТЬ: '{entity.name}' ({entity.entity_type.value})\n"
+            f"УТВЕРЖДЁННЫЕ ФАКТЫ:\n{facts_text}\n\n"
+            f"ПРОВЕРЯЕМАЯ ПРОЗА:\n"
+            f"Саммари: {entity.summary}\n"
+            f"Описание: {entity.description}\n"
+        )
+
+        if self._client:
+            try:
+                res: ProseVerification = self._client.chat.completions.create(
+                    model=self.model,
+                    response_model=ProseVerification,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_retries=2,
+                )
+                return res
+            except Exception as e:
+                logger.warning(f"Instructor prose verification fallback to raw call: {e}")
+
+        raw = self._call_llm(system_prompt, user_prompt)
+        parsed = self._parse_json_dict(raw)
+        return ProseVerification(
+            is_supported=bool(parsed.get("is_supported", True)) and not parsed.get("unsupported_claims", []) and not parsed.get("style_issues", []),
+            unsupported_claims=parsed.get("unsupported_claims", []),
+            style_issues=parsed.get("style_issues", []),
+        )
 
     # =========================================================================
     # CALLS & PARSERS
@@ -262,10 +382,11 @@ class LoreLLMClient:
         import time
         max_attempts = 3
         last_error = None
+        client_to_use = self._raw_client if self._raw_client is not None else self._client
 
         for attempt in range(1, max_attempts + 1):
             try:
-                resp = self._client.chat.completions.create(
+                resp = client_to_use.chat.completions.create(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -299,12 +420,24 @@ class LoreLLMClient:
             cleaned = cleaned.split("```")[1].split("```")[0]
 
         try:
+            res = json_repair.loads(cleaned.strip())
+            if isinstance(res, dict):
+                return res
+            if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+                return res[0]
+        except Exception:
+            pass
+
+        try:
             return json.loads(cleaned.strip())
         except Exception:
             start = cleaned.find("{")
             end = cleaned.rfind("}")
             if start != -1 and end != -1:
-                return json.loads(cleaned[start:end+1])
+                try:
+                    return json.loads(cleaned[start:end+1])
+                except Exception:
+                    pass
             return {}
 
     def _parse_facts_draft_json(self, raw_text: str, expected_name: str) -> EntityFactsDraft:
@@ -432,10 +565,10 @@ class LoreLLMClient:
         )
 
     def _mock_repair_facts_draft(self, draft: EntityFactsDraft, problems: List[str]) -> EntityFactsDraft:
-        clean_facts = []
-        for f in draft.facts:
-            st = f.statement.replace("без жертвы", "ценой великой жертвы").replace("бессмертный", "доблестный")
-            clean_facts.append(AtomicFact(year=f.year, era=f.era, statement=st, participants=f.participants))
+        clean_facts = [
+            AtomicFact(year=f.year, era=f.era, statement=f.statement, participants=f.participants)
+            for f in draft.facts
+        ]
         return EntityFactsDraft(
             name=draft.name,
             entity_type=draft.entity_type,
@@ -465,43 +598,23 @@ class LoreLLMClient:
         return self._mock_synthesize_prose(task, draft, world_bible)
 
     def _mock_repair(self, entity: Entity, problems: List[str]) -> Entity:
-        facts = [f.replace("без жертвы", "ценой жертвы").replace("бессмертный", "смертный") for f in entity.facts]
         return Entity(
             name=entity.name,
             entity_type=entity.entity_type,
-            summary=entity.summary.replace("бессмертный", "доблестный"),
-            description=entity.description.replace("без жертвы", "ценой жертвы").replace("бессмертный", "смертный"),
+            summary=entity.summary,
+            description=entity.description,
             era=entity.era,
             year=entity.year,
-            facts=facts,
-            relations=entity.relations,
+            facts=entity.facts[:],
+            relations=entity.relations[:],
         )
 
     def _mock_audit(self, entity: Entity, world_bible: WorldBible) -> Verdict:
-        text = f"{entity.summary} {entity.description} {' '.join(entity.facts)}".casefold()
-        violations = []
-
-        if any(w in text for w in ["бессмертный чародей", "бессмертный тиран", "вечным богом", "immortal tyrant", "became immortal"]):
-            if not any(neg in text for neg in ["не был", "не стал", "not immortal", "never claimed"]):
-                axiom_text = world_bible.immutable_laws[1] if len(world_bible.immutable_laws) > 1 else "Смертные не могут обрести истинное бессмертие или стать богами"
-                violations.append(Violation(
-                    axiom=axiom_text,
-                    quote="бессмертный чародей / вечным богом",
-                    explanation="Сущность заявляет бессмертие вопреки аксиоме о смертности",
-                    severity="canon_breaking",
-                ))
-
-        if any(w in text for w in ["магию без жертвы", "магию без платы", "колдовал без платы", "magic without sacrifice"]):
-            axiom_text = world_bible.immutable_laws[0] if len(world_bible.immutable_laws) > 0 else "Магия требует эквивалентной жертвы жизненной силы (закон сохранения чар)"
-            violations.append(Violation(
-                axiom=axiom_text,
-                quote="магию без жертвы / колдовал без платы",
-                explanation="Использование магии без жертвы нарушает закон сохранения чар",
-                severity="canon_breaking",
-            ))
-
+        name_cf = entity.name.strip().casefold()
+        if name_cf in self._mock_verdicts:
+            return self._mock_verdicts[name_cf]
         return Verdict(
-            is_valid=len(violations) == 0,
-            violations=violations,
+            is_valid=True,
+            violations=[],
             needs_review=False,
         )

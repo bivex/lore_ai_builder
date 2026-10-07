@@ -6,6 +6,52 @@ from datetime import datetime, timezone
 from .models import Entity, Relation, Task, WorldBible, EntityType
 
 
+try:
+    import pymorphy3
+    _morph = pymorphy3.MorphAnalyzer()
+except Exception:
+    _morph = None
+
+try:
+    from rapidfuzz import fuzz
+except Exception:
+    fuzz = None
+
+DEFAULT_ALLOWED_RELATIONS = [
+    ("character", "leader_of", "faction"),
+    ("character", "member_of", "faction"),
+    ("character", "allied_with", "character"),
+    ("character", "allied_with", "faction"),
+    ("faction", "allied_with", "character"),
+    ("faction", "allied_with", "faction"),
+    ("character", "enemy_of", "character"),
+    ("character", "enemy_of", "faction"),
+    ("faction", "enemy_of", "character"),
+    ("faction", "enemy_of", "faction"),
+    ("character", "located_in", "location"),
+    ("faction", "located_in", "location"),
+    ("artifact", "located_in", "location"),
+    ("location", "adjacent_to", "location"),
+    ("character", "participated_in", "historical_event"),
+    ("faction", "participated_in", "historical_event"),
+    ("artifact", "participated_in", "historical_event"),
+    ("character", "possesses", "artifact"),
+    ("character", "possesses", "location"),
+    ("faction", "possesses", "artifact"),
+    ("faction", "possesses", "location"),
+    ("artifact", "created_by", "character"),
+    ("artifact", "created_by", "faction"),
+    ("location", "created_by", "character"),
+    ("location", "created_by", "faction"),
+    ("historical_event", "created_by", "character"),
+    ("historical_event", "created_by", "faction"),
+    ("character", "predecessor_of", "character"),
+    ("faction", "predecessor_of", "faction"),
+    ("character", "successor_of", "character"),
+    ("faction", "successor_of", "faction"),
+]
+
+
 class LoreStore:
     """Persistent SQLite store for autonomous lore generation with queue and multi-tier memory."""
 
@@ -57,12 +103,27 @@ class LoreStore:
                 )
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS fact_participants (
+                    fact_id INTEGER,
+                    entity_name TEXT,
+                    PRIMARY KEY (fact_id, entity_name)
+                )
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS relations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     source_name TEXT,
                     target_name TEXT,
                     rel_type TEXT,
                     context TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS allowed_relations (
+                    src_type TEXT,
+                    rel_type TEXT,
+                    dst_type TEXT,
+                    PRIMARY KEY (src_type, rel_type, dst_type)
                 )
             """)
             cursor.execute("""
@@ -87,6 +148,13 @@ class LoreStore:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Seed allowed relations
+            for src, rel, dst in DEFAULT_ALLOWED_RELATIONS:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO allowed_relations (src_type, rel_type, dst_type)
+                    VALUES (?, ?, ?)
+                """, (src, rel, dst))
 
             # Schema migrations for existing databases
             cols_entities = {row["name"] for row in cursor.execute("PRAGMA table_info(entities)").fetchall()}
@@ -139,7 +207,8 @@ class LoreStore:
             return WorldBible()
 
     def resolve_canonical_name(self, name: str) -> str:
-        """Resolves alias/title variant or grammatical declension to an existing canonical entity name in SQLite.
+        """Resolves alias/title variant or grammatical declension to an existing canonical entity name in SQLite
+        using pymorphy3 morphological lemmatization and rapidfuzz typo tolerance.
         E.g. 'Вараг' matches 'Рунный кузнец Вараг', 'Ксентии'/'Ксения' matches 'Воевода Ксения'.
         Does NOT falsely merge distinct names like 'Радик' and 'Радим'.
         """
@@ -169,29 +238,34 @@ class LoreStore:
                         break
                 return cf
 
-            # Russian grammatical inflection endings for names/nouns
-            INFLECTION_ENDINGS = {"", "а", "я", "у", "ю", "е", "и", "ом", "ем", "ой", "ей", "ы", "ов", "ев", "ам", "ям"}
+            def get_lemmas(s: str) -> str:
+                if not _morph:
+                    return s
+                words = s.split()
+                return " ".join(_morph.parse(w)[0].normal_form for w in words)
 
             target_core = strip_titles(clean)
-            if len(target_core) >= 3:
-                all_entities = conn.execute("SELECT name FROM entities").fetchall()
-                for r in all_entities:
-                    cand = r["name"]
-                    cand_core = strip_titles(cand)
-                    if target_core == cand_core or target_core in cand_core.split() or cand_core in target_core.split():
+            target_lemma = get_lemmas(target_core)
+
+            all_entities = conn.execute("SELECT name FROM entities").fetchall()
+            for r in all_entities:
+                cand = r["name"]
+                cand_core = strip_titles(cand)
+                cand_lemma = get_lemmas(cand_core)
+
+                # Direct core equality or containment
+                if target_core == cand_core or target_core in cand_core.split() or cand_core in target_core.split():
+                    return cand
+
+                # Morphological lemma equality (e.g. Ксении -> ксения == Воевода Ксения -> ксения)
+                if target_lemma and cand_lemma:
+                    if target_lemma == cand_lemma or target_lemma in cand_lemma.split() or cand_lemma in target_lemma.split():
                         return cand
 
-                    # Common stem check with grammatical inflection endings
-                    common_len = 0
-                    min_len = min(len(target_core), len(cand_core))
-                    while common_len < min_len and target_core[common_len] == cand_core[common_len]:
-                        common_len += 1
-
-                    if common_len >= 4:
-                        suff1 = target_core[common_len:]
-                        suff2 = cand_core[common_len:]
-                        if suff1 in INFLECTION_ENDINGS and suff2 in INFLECTION_ENDINGS:
-                            return cand
+                # High-confidence typo tolerance via rapidfuzz (only for words >= 7 chars, ratio >= 92)
+                if fuzz and len(target_lemma) >= 7 and len(cand_lemma) >= 7:
+                    if fuzz.ratio(target_lemma, cand_lemma) >= 92.0:
+                        return cand
 
         return clean
 
@@ -233,7 +307,7 @@ class LoreStore:
             if entity.atomic_facts:
                 for af in entity.atomic_facts:
                     exists = cursor.execute(
-                        "SELECT 1 FROM facts WHERE entity_name=? AND statement=?",
+                        "SELECT id FROM facts WHERE entity_name=? AND statement=?",
                         (entity.name, af.statement)
                     ).fetchone()
                     if not exists:
@@ -241,10 +315,19 @@ class LoreStore:
                             "INSERT INTO facts (entity_name, year, era, statement, participants) VALUES (?, ?, ?, ?, ?)",
                             (entity.name, af.year, af.era, af.statement, json.dumps(af.participants, ensure_ascii=False))
                         )
+                        fact_id = cursor.lastrowid
+                    else:
+                        fact_id = exists["id"]
+
+                    if fact_id:
+                        cursor.execute("INSERT OR IGNORE INTO fact_participants (fact_id, entity_name) VALUES (?, ?)", (fact_id, entity.name))
+                        for p in af.participants:
+                            if p and p.strip():
+                                cursor.execute("INSERT OR IGNORE INTO fact_participants (fact_id, entity_name) VALUES (?, ?)", (fact_id, p.strip()))
             else:
                 for fact_text in entity.facts:
                     exists = cursor.execute(
-                        "SELECT 1 FROM facts WHERE entity_name=? AND statement=?",
+                        "SELECT id FROM facts WHERE entity_name=? AND statement=?",
                         (entity.name, fact_text)
                     ).fetchone()
                     if not exists:
@@ -252,6 +335,12 @@ class LoreStore:
                             "INSERT INTO facts (entity_name, year, era, statement, participants) VALUES (?, ?, ?, ?, ?)",
                             (entity.name, entity.year, entity.era, fact_text, json.dumps([]))
                         )
+                        fact_id = cursor.lastrowid
+                    else:
+                        fact_id = exists["id"]
+
+                    if fact_id:
+                        cursor.execute("INSERT OR IGNORE INTO fact_participants (fact_id, entity_name) VALUES (?, ?)", (fact_id, entity.name))
 
             # Commit relations with resolved canonical targets
             for rel in entity.relations:
@@ -273,6 +362,52 @@ class LoreStore:
                 (entity.name.strip().casefold(), resolved_self.strip().casefold())
             )
             conn.commit()
+
+    def check_lifespan_violations_sql(self, entity_name: str) -> List[str]:
+        """SQL check: character cannot live longer than 120 years across recorded facts."""
+        problems = []
+        with self._get_conn() as conn:
+            rows = conn.execute("""
+                SELECT p.entity_name, MAX(f.year) - MIN(f.year) AS span, MIN(f.year) AS min_y, MAX(f.year) AS max_y
+                FROM fact_participants p
+                JOIN facts f ON f.id = p.fact_id
+                JOIN entities e ON py_lower(TRIM(e.name)) = py_lower(TRIM(p.entity_name)) AND e.entity_type = 'character'
+                WHERE py_lower(TRIM(p.entity_name)) = ?
+                GROUP BY p.entity_name HAVING span > 120
+            """, (entity_name.strip().casefold(),)).fetchall()
+
+            for r in rows:
+                problems.append(
+                    f"Нарушение срока жизни смертного персонажа (SQL): факты '{r['entity_name']}' охватывают {r['span']} лет "
+                    f"({r['min_y']}..{r['max_y']} гг.). Смертные не могут жить более 120 лет без божественности (аксиома 2)."
+                )
+        return problems
+
+    def check_invalid_relations_sql(self, entity_name: Optional[str] = None) -> List[str]:
+        """SQL check: verifies relations against allowed_relations (src_type, rel, dst_type)."""
+        problems = []
+        with self._get_conn() as conn:
+            query = """
+                SELECT r.source_name, r.rel_type, r.target_name, s.entity_type AS src_type, t.entity_type AS dst_type
+                FROM relations r
+                JOIN entities s ON py_lower(TRIM(s.name)) = py_lower(TRIM(r.source_name))
+                JOIN entities t ON py_lower(TRIM(t.name)) = py_lower(TRIM(r.target_name))
+                LEFT JOIN allowed_relations a
+                  ON a.src_type = s.entity_type AND a.rel_type = r.rel_type AND a.dst_type = t.entity_type
+                WHERE a.rel_type IS NULL
+            """
+            params = ()
+            if entity_name:
+                query += " AND (py_lower(TRIM(r.source_name)) = ? OR py_lower(TRIM(r.target_name)) = ?)"
+                params = (entity_name.strip().casefold(), entity_name.strip().casefold())
+
+            rows = conn.execute(query, params).fetchall()
+            for r in rows:
+                problems.append(
+                    f"Онтологическая ошибка в связях (SQL): связь '{r['rel_type']}' между "
+                    f"'{r['source_name']}' ({r['src_type']}) и '{r['target_name']}' ({r['dst_type']}) недопустима."
+                )
+        return problems
 
     def push_task(self, task: Task) -> bool:
         resolved_name = self.resolve_canonical_name(task.name)

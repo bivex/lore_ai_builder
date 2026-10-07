@@ -25,12 +25,33 @@ class EntityType(str, Enum):
     ARTIFACT = "artifact"
 
 
+class RelationType(str, Enum):
+    LEADER_OF = "leader_of"
+    MEMBER_OF = "member_of"
+    PREDECESSOR_OF = "predecessor_of"
+    SUCCESSOR_OF = "successor_of"
+    ALLIED_WITH = "allied_with"
+    ENEMY_OF = "enemy_of"
+    LOCATED_IN = "located_in"
+    PARTICIPATED_IN = "participated_in"
+    POSSESSES = "possesses"
+    CREATED_BY = "created_by"
+    ADJACENT_TO = "adjacent_to"
+    CAUSE_OF = "cause_of"
+
+
 class Relation(BaseModel):
     target: str = Field(description="Name of the referenced entity")
     type: str = Field(
-        description="Ontological relation type: leader_of, predecessor_of, successor_of, member_of, allied_with, enemy_of, located_in, participated_in, cause_of, possesses, created_by"
+        description="Ontological relation type: leader_of, predecessor_of, successor_of, member_of, allied_with, enemy_of, located_in, participated_in, cause_of, possesses, created_by, adjacent_to"
     )
     context: str = Field(default="", description="Narrative context describing why this relationship exists")
+
+
+class ProseVerification(BaseModel):
+    is_supported: bool = Field(default=True, description="Опирается ли художественный текст строго на утвержденные факты")
+    unsupported_claims: List[str] = Field(default_factory=list, description="Утверждения в прозе, которых нет в утвержденных фактах")
+    style_issues: List[str] = Field(default_factory=list, description="Анахронизмы (шестеренки, часовые механизмы) или выдуманные слова")
 
 
 class AtomicFact(BaseModel):
