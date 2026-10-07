@@ -19,6 +19,7 @@ from lore_builder.infrastructure.adapters.memory.tencent_memory_adapter import T
 from lore_builder.infrastructure.adapters.llm.mock_llm_adapter import MockLLMAdapter
 from lore_builder.infrastructure.adapters.llm.openai_compatible_adapter import OpenAICompatibleLLMAdapter
 from lore_builder.infrastructure.adapters.event_publisher import InMemoryEventPublisherAdapter
+from lore_builder.infrastructure.adapters.audit.open_jev_lore_adapter import OpenJevLoreAdapter
 
 
 def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
@@ -30,6 +31,7 @@ def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
     # Strictly loads native C++ JobObjects_RD (fails if native dylib/dll missing)
     resources = JobObjectsResourceAdapter()
     events = InMemoryEventPublisherAdapter()
+    jev = OpenJevLoreAdapter()
 
     if use_mock_llm:
         llm = MockLLMAdapter(should_violate_canon=False)
@@ -37,7 +39,7 @@ def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
         # Strictly queries OpenRouter using credentials from .env
         llm = OpenAICompatibleLLMAdapter()
 
-    auditor = AuditEntityUseCase(memory_port=memory, event_publisher=events)
+    auditor = AuditEntityUseCase(memory_port=memory, event_publisher=events, jev_port=jev)
     generator = GenerateEntityUseCase(
         memory_port=memory,
         resource_controller=resources,
@@ -50,8 +52,10 @@ def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
         resource_controller=resources,
         llm_provider=llm,
         event_publisher=events,
+        jev_port=jev,
+        audit_use_case=auditor,
     )
-    return memory, generator, orchestrator
+    return memory, generator, orchestrator, jev
 
 
 def main():
@@ -80,8 +84,29 @@ def main():
     graph_parser = subparsers.add_parser("graph", help="Query entity Wiki link graph")
     graph_parser.add_argument("--name", required=True, help="Entity name")
 
+    # Command: jev-audit
+    jev_audit_parser = subparsers.add_parser("jev-audit", help="Run Jev System-1 calibrated canon audit on narrative")
+    jev_audit_parser.add_argument("--name", required=True, help="Entity name")
+    jev_audit_parser.add_argument("--narrative", required=True, help="Entity narrative / deed description")
+
+    # Command: jev-classify
+    jev_cls_parser = subparsers.add_parser("jev-classify", help="Run Jev System-1 ontological relation classification")
+    jev_cls_parser.add_argument("--source", required=True, help="Subject entity")
+    jev_cls_parser.add_argument("--target", required=True, help="Object entity")
+    jev_cls_parser.add_argument("--context", required=True, help="Narrative context describing their interaction")
+
+    # Command: jev-score
+    jev_score_parser = subparsers.add_parser("jev-score", help="Run Jev System-1 lore distortion risk scoring")
+    jev_score_parser.add_argument("--narrative", required=True, help="Entity narrative")
+
+    # Command: jev-temporal
+    jev_temp_parser = subparsers.add_parser("jev-temporal", help="Run Jev System-1 Allen interval temporal relation classification")
+    jev_temp_parser.add_argument("--a", required=True, help="First epoch/event")
+    jev_temp_parser.add_argument("--b", required=True, help="Second epoch/event")
+    jev_temp_parser.add_argument("--context", required=True, help="Historical timeline narrative context")
+
     args = parser.parse_args()
-    memory, generator, orchestrator = build_container(
+    memory, generator, orchestrator, jev = build_container(
         use_live_tencent=args.tencent,
         use_mock_llm=args.mock_llm,
     )
@@ -125,6 +150,62 @@ def main():
     elif args.command == "graph":
         g = memory.get_entity_wiki_graph(args.name)
         print(json.dumps(g, indent=2, ensure_ascii=False))
+
+    elif args.command == "jev-audit":
+        world = memory.get_world_bible()
+        report = jev.audit_entity_canon(
+            world_rules=world.render_prompt_context(),
+            entity_name=args.name,
+            entity_narrative=args.narrative,
+            immutable_laws=world.immutable_laws,
+        )
+        print(f"\n⚡ [JEV SYSTEM-1 CANON AUDIT REPORT]")
+        print(f"Entity: {args.name}")
+        print(f"Recommended Verdict: {report.recommended_verdict}")
+        print(f"Compliance P(Yes): {report.is_canon_consistent.p_yes:.3f} (Conf: {report.is_canon_consistent.confidence:.3f})")
+        print(f"Distortion Risk Score: {report.lore_distortion_risk.score:.2f} / 3.00")
+        print(f"Distortion Levels: {json.dumps(report.lore_distortion_risk.level_probabilities, indent=2)}")
+        print(f"Axiom Evaluations:")
+        for ax, dec in report.axiom_evaluations.items():
+            print(f"  - [{dec.verdict}] '{ax}': P(comply)={dec.p_yes:.3f}, conf={dec.confidence:.3f}")
+        print(f"Explanation: {report.explanation}")
+
+    elif args.command == "jev-classify":
+        candidates = ["allied_with", "enemy_of", "vassal_of", "ruler_of", "creator_of", "located_in", "worships", "opposes"]
+        choice = jev.classify_relation_type(
+            entity_a=args.source,
+            entity_b=args.target,
+            narrative_context=args.context,
+            candidate_relations=candidates,
+        )
+        print(f"\n⚡ [JEV SYSTEM-1 ONTOLOGY CLASSIFICATION]")
+        print(f"Relation: '{choice.entity_a}' --[{choice.relation}]--> '{choice.entity_b}'")
+        print(f"Confidence: {choice.confidence:.3f}")
+        print(f"Probability Distribution:")
+        for opt, prob in sorted(choice.probabilities.items(), key=lambda x: x[1], reverse=True):
+            print(f"  • {opt}: {prob:.3f}")
+
+    elif args.command == "jev-score":
+        score_dec = jev.evaluate_lore_distortion_risk(
+            world_context="High fantasy canon",
+            entity_narrative=args.narrative,
+        )
+        print(f"\n⚡ [JEV SYSTEM-1 DISTORTION SCORE]")
+        print(f"Expected Score: {score_dec.score:.2f} / 3.00 (Conf: {score_dec.confidence:.3f})")
+        for lvl, prob in score_dec.level_probabilities.items():
+            print(f"  • Level '{lvl}': {prob:.3f}")
+
+    elif args.command == "jev-temporal":
+        temp_dec = jev.classify_temporal_relation(
+            interval_a=args.a,
+            interval_b=args.b,
+            narrative_context=args.context,
+        )
+        print(f"\n⚡ [JEV SYSTEM-1 TEMPORAL RELATION (ALLEN'S ALGEBRA)]")
+        print(f"Allen Relation: '{temp_dec.interval_a}' is [{temp_dec.allen_relation.upper()}] relative to '{temp_dec.interval_b}'")
+        print(f"Confidence: {temp_dec.confidence:.3f}")
+        for rel, prob in sorted(temp_dec.probabilities.items(), key=lambda x: x[1], reverse=True):
+            print(f"  • {rel}: {prob:.3f}")
 
     else:
         parser.print_help()

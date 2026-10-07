@@ -86,11 +86,20 @@ Structured knowledge flow preventing context window degradation:
 | **Wiki + Link Graph** | **Entity Network:** Bidirectional connections between characters, factions, and places. | Backlinks, Outbound links, graph traversal. |
 | **L0 Conversation** | **Audit Trail:** Raw generation prompts and assistant drafts. | Session-scoped conversation logs. |
 
-### 3. Canon Consistency Defense
-Before any entity draft is committed to canon, `DomainConsistencyPolicy`:
-1. Audits statements against all **L3 World Bible Immutable Laws** (e.g. mortality rules, law of conservation of magic).
-2. Verifies assertions against known **L1 Atomic Facts**.
-3. Rejects conflicting proposals with `LoreCanonConflictError` before they can corrupt the lore graph.
+### 3. Jev System-1 Calibrated Decision Engine (Tailored for Lore)
+Instead of relying solely on heavy, slow autoregressive LLM calls for validation (5–15 seconds per check), Lore AI Builder integrates **Jev / Open-Jev System-1 typed decisions** running in sub-50ms forward passes:
+* **`JevNoulDecision` (Axiom Compliance):** Non-autoregressive Boolean verdict with calibrated probability $P(\text{comply}) \in [0.0, 1.0]$. Tested in parallel against all World Bible immutable laws.
+* **`JevScoreDecision` (Lore Distortion Risk):** Ordinal assessment across calibrated severity levels (`none`, `minor`, `severe`, `canon_breaking`) with an expected risk score $[0.00 .. 3.00]$.
+* **`LoreOntologyRelationChoice` (Categorical Ontological Relations):** Multi-class decision predicting semantic relationship types (`allied_with`, `ruler_of`, `enemy_of`, `vassal_of`, `worships`, `located_in`) to populate the Wiki graph.
+* **`LoreTemporalChoice` (Allen's Interval Algebra):** Categorical temporal relation classification (`before`, `meets`, `during`, `overlaps`, `equals`, `after`) across historical epochs.
+* **"Read Once, Ask Many" (Jev v3 Architecture):** The World Bible state is rendered once and answers multiple axiom compliance questions in a single parallel pass without token re-encoding.
+
+### 4. Complete Worldbuilding Algorithmic Suite
+* **DAG Task Decomposition & Kahn's Topological Sort:** Breaks high-level worldbuilding prompts into dependency DAGs and organizes multi-agent generation waves.
+* **Allen's Interval Temporal Algebra:** Strictly detects causal timeline paradoxes (e.g. an entity born after a kingdom fell cannot be its founder).
+* **Jaro-Winkler Entity Resolution:** Deduplicates character and location names across multi-agent swarms with configurable similarity thresholds.
+* **Reciprocal Rank Fusion (RRF) & 0/1 Knapsack Context Packing:** Combines BM25 and vector search results, dynamically packing facts within strict token budgets.
+* **Triplet Extraction & Graph Distillation:** Extracts OpenIE subject-predicate-object triplets, maps them into canonical ontology edges via Jev Choice, and writes them into the Wiki graph.
 
 ---
 
@@ -128,16 +137,15 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
 ## 🧪 Testing
 
-Run the full unit test suite (100% pass):
+Run the full unit test suite (100% pass across all 17 tests):
 ```bash
-python3 -m pytest tests/unit/test_lore_pipeline.py -v
+python3 -m pytest tests/unit/ -v
 ```
 
 Tests validate:
-* `test_domain_entity_lifecycle`: Aggregate state transitions (`DRAFT` → `AUDITING` → `CANONICAL`).
-* `test_consistency_policy_detects_violation`: Domain service catching canon breaches.
-* `test_end_to_end_generation_with_job_objects_shield`: End-to-end generation under native OS memory trim.
-* `test_canon_violation_triggers_rejection`: Automatic rejection of contradicting lore drafts.
+* **Algorithms Suite (`test_algorithms.py`):** Allen's interval algebra, Jaro-Winkler entity resolution, DAG topological sorting, RRF + Knapsack token packing, triplet extraction, and end-to-end swarm orchestration.
+* **Jev System-1 Lore Engine (`test_jev_lore.py`):** Calibrated Noul axiom evaluations, Score distortion risks, Choice ontological relation classification, temporal interval analysis, and swarm knowledge graph enrichment.
+* **Core Pipeline & Kernel Shield (`test_lore_pipeline.py`):** Domain entity lifecycle, native C++ `JobObjects_RD` memory trimming and process freezing, and strict canon defense rejection.
 
 ---
 
@@ -145,13 +153,14 @@ Tests validate:
 
 ### 1. Run the End-to-End Architectural Demo
 ```bash
-python3 lore_builder/presentation/demo.py
+python3 -m lore_builder.presentation.demo
 ```
 This demonstrates:
 1. Initializing the L3 World Bible (*Aethelgard*).
-2. Generating a canonical character (*Kaelen Voss*) under OS resource control.
+2. Generating a canonical character (*Kaelen Voss*) under native OS resource control (`JobObjects_RD`).
 3. Automatically intercepting and rejecting an invalid entity (*Malakor the Undying*, which attempts to bypass mortality rules).
-4. Querying the resulting Wiki Link Graph.
+4. Running sub-50ms **Jev System-1 Typed Decisions** (Noul axiom compliance, distortion score, ontology classification, Allen interval relation).
+5. Querying the resulting Wiki Link Graph.
 
 ### 2. Live Generation via OpenRouter (`nvidia/nemotron-3-ultra-550b-a55b:free`)
 ```bash
@@ -162,12 +171,12 @@ python3 test_openrouter_nemotron.py
 
 #### View Active World Bible (L3):
 ```bash
-python3 lore_builder/presentation/cli.py show-world
+python3 -m lore_builder.presentation.cli show-world
 ```
 
 #### Generate a New Lore Entity:
 ```bash
-python3 lore_builder/presentation/cli.py generate \
+python3 -m lore_builder.presentation.cli generate \
   --name "The Iron Archon" \
   --type character \
   --prompt "A mechanical golem general powered by blood sacrifice" \
@@ -177,13 +186,44 @@ python3 lore_builder/presentation/cli.py generate \
 
 #### Run Full Multi-Agent Swarm DAG Pipeline:
 ```bash
-python3 lore_builder/presentation/cli.py swarm \
+python3 -m lore_builder.presentation.cli swarm \
   --prompt "Create the northern necromancer clan, their ancient feud with the sun paladins, and the war that changed their lands"
 ```
 
 #### Inspect Entity Wiki Link Graph:
 ```bash
-python3 lore_builder/presentation/cli.py graph --name "The Iron Archon"
+python3 -m lore_builder.presentation.cli graph --name "The Iron Archon"
+```
+
+#### Jev System-1 Lore Subcommands:
+
+##### Run Instant Canon Audit on Entity Narrative:
+```bash
+python3 -m lore_builder.presentation.cli jev-audit \
+  --name "Malakor the Undying" \
+  --narrative "An immortal tyrant who cast infinite magic without sacrifice"
+```
+
+##### Classify Ontological Relationship:
+```bash
+python3 -m lore_builder.presentation.cli jev-classify \
+  --source "High Commander Kaelen" \
+  --target "The Silver Wardens" \
+  --context "Commander Kaelen commands the Silver Wardens"
+```
+
+##### Evaluate Lore Distortion Risk Score:
+```bash
+python3 -m lore_builder.presentation.cli jev-score \
+  --narrative "An ordinary blacksmith crafting bronze swords in the market"
+```
+
+##### Classify Historical Temporal Relation (Allen's Algebra):
+```bash
+python3 -m lore_builder.presentation.cli jev-temporal \
+  --a "The Dawn Era" \
+  --b "The Cataclysm" \
+  --context "The Dawn Era occurred centuries prior to the Cataclysm"
 ```
 
 ---

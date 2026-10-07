@@ -6,6 +6,7 @@ from ..ports.outbound.memory_port import MemoryPort
 from ..ports.outbound.resource_port import ResourceControllerPort
 from ..ports.outbound.llm_port import LLMProviderPort
 from ..ports.outbound.event_publisher_port import EventPublisherPort
+from ..ports.outbound.jev_decision_port import JevDecisionPort
 from ..use_cases.generate_entity_use_case import GenerateEntityUseCase
 from ..use_cases.audit_entity_use_case import AuditEntityUseCase
 from ..dto.entity_dto import GenerateEntityCommand, EntityResponseDTO
@@ -30,7 +31,7 @@ class SwarmGenerationResultDTO:
 class OrchestrateSwarmUseCase:
     """Master Algorithm: Coordinates multi-agent swarm generation across DAG topological waves,
     optimizing context packing (RRF + Knapsack), enforcing OS resource limits (JobObjects_RD),
-    and guaranteeing temporal and axiomatic consistency.
+    guaranteeing temporal and axiomatic consistency, and classifying relations via Jev System-1 decisions.
     """
 
     def __init__(
@@ -39,13 +40,20 @@ class OrchestrateSwarmUseCase:
         resource_controller: ResourceControllerPort,
         llm_provider: LLMProviderPort,
         event_publisher: EventPublisherPort,
+        jev_port: Optional[JevDecisionPort] = None,
+        audit_use_case: Optional[AuditEntityUseCase] = None,
     ):
         self.memory = memory_port
         self.resources = resource_controller
         self.llm = llm_provider
         self.publisher = event_publisher
+        self.jev = jev_port
 
-        self.auditor = AuditEntityUseCase(memory_port=self.memory, event_publisher=self.publisher)
+        self.auditor = audit_use_case or AuditEntityUseCase(
+            memory_port=self.memory,
+            event_publisher=self.publisher,
+            jev_port=self.jev,
+        )
         self.generator = GenerateEntityUseCase(
             memory_port=self.memory,
             resource_controller=self.resources,
@@ -97,6 +105,30 @@ class OrchestrateSwarmUseCase:
                     entity_name=res.name,
                     text=res.description,
                 )
+
+                # Algorithm: Jev System-1 Ontological Relation Classification
+                if self.jev and extracted_relations:
+                    candidate_relation_types = [
+                        "allied_with", "enemy_of", "vassal_of", "ruler_of",
+                        "creator_of", "located_in", "worships", "opposes", "member_of"
+                    ]
+                    for target, rel_hint in extracted_relations.items():
+                        ontology_choice = self.jev.classify_relation_type(
+                            entity_a=res.name,
+                            entity_b=target,
+                            narrative_context=f"{res.description} {rel_hint}",
+                            candidate_relations=candidate_relation_types,
+                        )
+                        self.memory.add_entity_relation(
+                            from_entity=res.name,
+                            to_entity=target,
+                            relation_type=ontology_choice.relation,
+                        )
+                        logger.info(
+                            f"Jev classified relation: '{res.name}' --[{ontology_choice.relation}]--> '{target}' "
+                            f"(confidence: {ontology_choice.confidence:.2f})"
+                        )
+
                 logger.info(f"Generated & validated '{res.name}' ({res.entity_type}) with {len(res.facts)} facts.")
 
         # 4. Compile Wiki Knowledge Network Nodes
