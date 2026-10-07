@@ -7,3 +7,5 @@ __pycache__/
 *.dylib
 *.so
 out/
+.env
+.env.*
