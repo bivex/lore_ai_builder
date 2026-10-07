@@ -1,6 +1,20 @@
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field
+
+
+class Violation(BaseModel):
+    axiom: str = Field(description="Дословно закон из аксиом мира, который нарушен")
+    quote: str = Field(description="Точная цитата из текста сущности, где найдено нарушение")
+    explanation: str = Field(default="", description="Почему это нарушает закон")
+    severity: Literal["minor", "severe", "canon_breaking"] = "canon_breaking"
+
+
+class Verdict(BaseModel):
+    is_valid: bool = Field(default=True, description="Является ли сущность канонически верной")
+    violations: List[Violation] = Field(default_factory=list, description="Список выявленных нарушений")
+    needs_review: bool = Field(default=False, description="Флаг для спорных случаев, не останавливающий прогон")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class EntityType(str, Enum):

@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from .models import Entity, Relation, Task, WorldBible, EntityType
+from .models import Entity, Relation, Task, WorldBible, EntityType, Violation, Verdict
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,116 @@ class LoreLLMClient:
 
         raw = self._call_llm(system_prompt, user_prompt)
         return self._parse_entity_json(raw, entity.name)
+
+    def audit_entity(self, entity: Entity, world_bible: WorldBible) -> Verdict:
+        """Structured LLM-Judge audit replacing brittle regular expressions."""
+        if self.use_mock:
+            return self._mock_audit(entity, world_bible)
+
+        system_prompt = (
+            f"Ты — строгий независимый аудитор и судья канона вселенной '{world_bible.name}'.\n"
+            "НЕПРЕЛОЖНЫЕ ЗАКОНЫ МИРА (АКСИОМЫ):\n"
+            + "\n".join(f"- {l}" for l in world_bible.immutable_laws) + "\n\n"
+            "ПРАВИЛА ОЦЕНКИ:\n"
+            "1. Нарушением считай ТОЛЬКО буквальное, прямое противоречие закону мира (например, персонаж обрёл истинное бессмертие, стал богом, или сотворил могущественную магию без жертвы жизненной силы).\n"
+            "2. Метафоры ('бессмертная верность', 'вечная слава в песнях', 'неувядающая дружба') НЕ являются нарушением!\n"
+            "3. Отрицания ('не стал бессмертным', 'никогда не претендовал на божественность') НЕ являются нарушением!\n"
+            "4. Описание битв с бессмертными врагами ('сражался с бессмертными тварями Нави') НЕ является нарушением персонажа!\n"
+            "5. Жертва ради блага других ('без ущерба для крестьян') НЕ является нарушением, если сам герой принёс жертву.\n"
+            "6. Для каждого нарушения ОБЯЗАТЕЛЬНО укажи дословную аксиому, точную цитату из текста, объяснение и severity ('minor', 'severe', 'canon_breaking').\n"
+            "7. Если текст каноничен и нарушений нет, верни violations: [].\n\n"
+            "ФОРМАТ JSON:\n"
+            "{\n"
+            '  "is_valid": true,\n'
+            '  "violations": [\n'
+            '    {\n'
+            '      "axiom": "Закон о смертности",\n'
+            '      "quote": "Стал бессмертным богом",\n'
+            '      "explanation": "Смертный обрел бессмертие вопреки аксиоме",\n'
+            '      "severity": "canon_breaking"\n'
+            '    }\n'
+            '  ],\n'
+            '  "needs_review": false\n'
+            "}"
+        )
+
+        user_prompt = (
+            f"ПРОВЕРЯЕМАЯ СУЩНОСТЬ: '{entity.name}' ({entity.entity_type.value})\n"
+            f"Саммари: {entity.summary}\n"
+            f"Описание: {entity.description}\n"
+            f"Факты:\n" + "\n".join(f"- {f}" for f in entity.facts)
+        )
+
+        raw = self._call_llm(system_prompt, user_prompt)
+        return self._parse_verdict_json(raw)
+
+    def _parse_verdict_json(self, raw_text: str) -> Verdict:
+        cleaned = raw_text.strip()
+        if "```json" in cleaned:
+            cleaned = cleaned.split("```json")[1].split("```")[0]
+        elif "```" in cleaned:
+            cleaned = cleaned.split("```")[1].split("```")[0]
+
+        try:
+            data = json.loads(cleaned.strip())
+        except Exception:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1:
+                try:
+                    data = json.loads(cleaned[start:end+1])
+                except Exception:
+                    return Verdict(is_valid=True, violations=[], needs_review=True)
+            else:
+                return Verdict(is_valid=True, violations=[], needs_review=True)
+
+        violations_raw = data.get("violations", [])
+        violations = []
+        for v in violations_raw:
+            if isinstance(v, dict) and "axiom" in v:
+                violations.append(Violation(
+                    axiom=str(v.get("axiom", "")),
+                    quote=str(v.get("quote", "")),
+                    explanation=str(v.get("explanation", "")),
+                    severity=v.get("severity", "canon_breaking"),
+                ))
+        return Verdict(
+            is_valid=len(violations) == 0,
+            violations=violations,
+            needs_review=bool(data.get("needs_review", False)),
+        )
+
+    def _mock_audit(self, entity: Entity, world_bible: WorldBible) -> Verdict:
+        """Deterministic zero-regex mock judge for tests and offline usage."""
+        text = f"{entity.summary} {entity.description} {' '.join(entity.facts)}".casefold()
+        violations = []
+
+        # Mortality check: true claims of personal immortality or becoming a god
+        if any(w in text for w in ["бессмертный чародей", "бессмертный тиран", "вечным богом", "immortal tyrant", "became immortal"]):
+            if not any(neg in text for neg in ["не был", "не стал", "not immortal", "never claimed"]):
+                axiom_text = world_bible.immutable_laws[1] if len(world_bible.immutable_laws) > 1 else "Смертные не могут обрести истинное бессмертие или стать богами"
+                violations.append(Violation(
+                    axiom=axiom_text,
+                    quote="бессмертный чародей / вечным богом",
+                    explanation="Сущность заявляет бессмертие вопреки аксиоме о смертности",
+                    severity="canon_breaking",
+                ))
+
+        # Sacrifice check: magic without price
+        if any(w in text for w in ["магию без жертвы", "магию без платы", "колдовал без платы", "magic without sacrifice"]):
+            axiom_text = world_bible.immutable_laws[0] if len(world_bible.immutable_laws) > 0 else "Магия требует эквивалентной жертвы жизненной силы (закон сохранения чар)"
+            violations.append(Violation(
+                axiom=axiom_text,
+                quote="магию без жертвы / колдовал без платы",
+                explanation="Использование магии без жертвы нарушает закон сохранения чар",
+                severity="canon_breaking",
+            ))
+
+        return Verdict(
+            is_valid=len(violations) == 0,
+            violations=violations,
+            needs_review=False,
+        )
 
     def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
         import time

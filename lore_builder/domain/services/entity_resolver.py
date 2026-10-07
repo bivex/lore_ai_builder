@@ -1,5 +1,4 @@
 from typing import Dict, List, Optional, Tuple
-import re
 
 
 def jaro_winkler_similarity(s1: str, s2: str, p: float = 0.1) -> float:
@@ -61,12 +60,30 @@ def jaro_winkler_similarity(s1: str, s2: str, p: float = 0.1) -> float:
 
 
 def normalize_entity_name(name: str) -> str:
-    """Strips leading articles, honorifics, and punctuation."""
-    cleaned = name.strip()
-    prefixes = [r"^(the|a|an)\s+", r"^(order\s+of|clan\s+of|house\s+of|lord|lady|king|queen)\s+"]
-    for pref in prefixes:
-        cleaned = re.sub(pref, "", cleaned, flags=re.IGNORECASE)
-    return re.sub(r"[^\w\s-]", "", cleaned).strip().lower()
+    """Strips leading articles, honorifics, and punctuation without regex."""
+    import unicodedata
+    cleaned = unicodedata.normalize("NFKC", name).strip()
+    cf = cleaned.casefold()
+
+    # 1. Strip articles
+    articles = ("the ", "a ", "an ")
+    for art in articles:
+        if cf.startswith(art):
+            cf = cf.removeprefix(art).strip()
+            break
+
+    # 2. Strip organization/title prefixes
+    titles = (
+        "order of ", "clan of ", "house of ",
+        "lord ", "lady ", "king ", "queen ",
+        "князь ", "воевода ", "орден ", "клан "
+    )
+    for title in titles:
+        if cf.startswith(title):
+            cf = cf.removeprefix(title).strip()
+            break
+
+    return "".join(c for c in cf if c.isalnum() or c in (" ", "-")).strip()
 
 
 class EntityResolutionService:

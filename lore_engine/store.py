@@ -215,30 +215,51 @@ class LoreStore:
             row = conn.execute("SELECT COUNT(*) as cnt FROM entities").fetchone()
             return row["cnt"] if row else 0
 
+    def get_compressed_world_context(self, task: Task, recent_window: int = 3) -> str:
+        """Hybrid memory retrieval with graph compression: compact 1-line summaries for older entities,
+        detailed facts for immediately connected and recent entities.
+        Keeps LLM token budget constant even for hundreds of entities in graph.
+        """
+        with self._get_conn() as conn:
+            parts = []
+
+            # 1. Compact compressed summary of older entities (Graph compression / pruning)
+            older = conn.execute(
+                "SELECT name, entity_type, summary, year FROM entities ORDER BY rowid ASC"
+            ).fetchall()
+            if len(older) > recent_window:
+                older_summaries = [
+                    f"• [{r['entity_type'].upper()}] {r['name']} ({r['year']} г.): {r['summary'][:100]}..."
+                    for r in older[:-recent_window]
+                ]
+                parts.append("СЖАТАЯ ХРОНИКА МИРА (АРХИВ ГРАФА):\n" + "\n".join(older_summaries[-5:]))
+
+            # 2. Direct facts from source entity (immediate parent context)
+            if task.source_entity:
+                source_facts = conn.execute(
+                    "SELECT statement FROM facts WHERE entity_name = ? LIMIT 3",
+                    (task.source_entity,)
+                ).fetchall()
+                if source_facts:
+                    parts.append(
+                        f"ФАКТЫ СВЯЗАННОЙ СУЩНОСТИ '{task.source_entity}':\n"
+                        + "\n".join(f"- {r['statement']}" for r in source_facts)
+                    )
+
+            # 3. Most recent verified facts
+            recent_facts = conn.execute(
+                "SELECT entity_name, statement FROM facts ORDER BY id DESC LIMIT ?",
+                (recent_window * 2,)
+            ).fetchall()
+            if recent_facts:
+                recent_lines = [f"- [{r['entity_name']}] {r['statement']}" for r in recent_facts]
+                parts.append("ПОСЛЕДНИЕ СОБЫТИЯ В МИРЕ:\n" + "\n".join(recent_lines[:4]))
+
+            return "\n\n".join(parts) if parts else "Нет зафиксированных фактов."
+
     def get_context_facts(self, task: Task, limit: int = 5) -> str:
         """Retrieves top-k relevant facts from SQLite to feed into LLM prompt."""
-        with self._get_conn() as conn:
-            # First grab facts from related source entity if present
-            facts = []
-            if task.source_entity:
-                rows = conn.execute(
-                    "SELECT statement FROM facts WHERE entity_name = ? LIMIT ?",
-                    (task.source_entity, 3)
-                ).fetchall()
-                facts.extend(r["statement"] for r in rows)
-
-            # Query recent facts
-            needed = limit - len(facts)
-            if needed > 0:
-                rows = conn.execute(
-                    "SELECT statement FROM facts ORDER BY id DESC LIMIT ?",
-                    (needed,)
-                ).fetchall()
-                for r in rows:
-                    if r["statement"] not in facts:
-                        facts.append(r["statement"])
-
-            return "\n".join(f"- {f}" for f in facts) if facts else "Нет зафиксированных фактов."
+        return self.get_compressed_world_context(task, recent_window=3)
 
     def record_conversation(self, session_id: str, prompt: str, response: str) -> None:
         with self._get_conn() as conn:

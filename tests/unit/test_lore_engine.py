@@ -166,3 +166,53 @@ def test_autonomous_red_links_engine_mock_run():
     finally:
         if os.path.exists(db_path):
             os.remove(db_path)
+
+
+def test_hybrid_judge_deterministic_graph_checks_and_verdict():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        db_path = tf.name
+
+    try:
+        store = LoreStore(db_path=db_path)
+        world = WorldBible(
+            name="Явь и Навь",
+            immutable_laws=["Смертные не могут обрести истинное бессмертие или стать богами"],
+        )
+        llm = LoreLLMClient(use_mock=True)
+        judge = LoreJudge(llm_client=llm, store=store)
+
+        # 1. Commit historical event in year 500
+        event = Entity(
+            name="Великая Стужа",
+            entity_type=EntityType.HISTORICAL_EVENT,
+            summary="Катастрофическая зима",
+            description="Ледяная буря Нави",
+            year=500,
+            facts=["500 год — замерзание рек."],
+            relations=[],
+        )
+        store.commit_entity(event)
+
+        # 2. Character in year 100 pointing to year 500 event (temporal paradox) and self-reference
+        violating_char = Entity(
+            name="Охотник Яромир",
+            entity_type=EntityType.CHARACTER,
+            summary="Обычный охотник, не ставший бессмертным",
+            description="Охотник Яромир никогда не был бессмертным и не искал божественности.",
+            year=100,
+            facts=["100 год — родился в тайге."],
+            relations=[
+                Relation(target="Охотник Яромир", type="allied_with", context="Сам себе союзник"),
+                Relation(target="Великая Стужа", type="participated_in", context="Жил спустя 400 лет"),
+            ],
+        )
+
+        problems = judge.audit(violating_char, world)
+        # Should catch self-reference and temporal paradox without ANY regexes
+        assert any("ссылаться сама на себя" in p for p in problems)
+        assert any("Временной парадокс в графе" in p for p in problems)
+        # But NOT mortality violation because of negation "не был бессмертным"
+        assert not any("аксиомы" in p for p in problems)
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)

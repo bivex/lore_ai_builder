@@ -96,12 +96,12 @@ def main():
     print("=" * 74)
 
     store = LoreStore(db_path=args.db)
-    judge = LoreJudge()
     llm = LoreLLMClient(
         base_url=base_url,
         model=args.model,
         use_mock=use_mock,
     )
+    judge = LoreJudge(llm_client=llm, store=store)
 
     # Callbacks for real-time streaming progress
     counter = [0]
