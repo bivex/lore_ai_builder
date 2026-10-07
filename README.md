@@ -28,14 +28,20 @@ lore_builder/
 │   │   ├── aggregate.py                     # WorldBibleAggregate (L3), LoreEntityAggregate
 │   │   ├── entity.py                        # LoreFact (L1 atomic canon fact)
 │   │   ├── value_objects.py                 # EntityType, CanonStatus, RelationType, TimelinePoint
-│   │   └── events.py                        # Domain Events (EntityDraftCreated, AuditPassed, etc.)
+│   │   ├── events.py                        # Domain Events (EntityDraftCreated, AuditPassed, etc.)
+│   │   └── jev_decisions.py                 # Typed System-1 decisions (Noul, Choice, Score)
 │   ├── services/
-│   │   └── consistency_checker.py           # Domain Consistency Service (Axiom & Fact conflict audit)
+│   │   ├── consistency_checker.py           # Domain Consistency Service (Semantic Axiom & Fact audit)
+│   │   ├── temporal_validator.py            # Allen's Interval Algebra consistency engine
+│   │   ├── entity_resolver.py               # Jaro-Winkler entity resolution & alias deduplication
+│   │   ├── dag_decomposer.py                # Kahn's Topological Sort & Task DAG decomposition
+│   │   └── triplet_extractor.py             # OpenIE triplet extraction & graph distillation
 │   └── exceptions.py                        # Domain Exceptions (LoreCanonConflictError)
 │
 ├── application/                             # 2. APPLICATION LAYER (Use Cases & Ports)
 │   ├── dto/
-│   │   └── entity_dto.py                    # GenerateEntityCommand, EntityResponseDTO, AuditResultDTO
+│   │   ├── entity_dto.py                    # GenerateEntityCommand, EntityResponseDTO, AuditResultDTO
+│   │   └── workflow_dto.py                  # Declarative YAML workflow contracts and task DTOs
 │   ├── ports/
 │   │   ├── inbound/                         # Driving Ports (API / UI interfaces)
 │   │   │   ├── generate_lore_port.py        # GenerateLoreUseCasePort
@@ -44,10 +50,16 @@ lore_builder/
 │   │       ├── memory_port.py               # MemoryPort (Abstraction for L0-L3 & Wiki Knowledge)
 │   │       ├── resource_port.py             # ResourceControllerPort (OS Kernel Controller abstraction)
 │   │       ├── llm_port.py                  # LLMProviderPort (Inference provider abstraction)
-│   │       └── event_publisher_port.py      # EventPublisherPort (Domain event dispatcher)
+│   │       ├── event_publisher_port.py      # EventPublisherPort (Domain event dispatcher)
+│   │       └── jev_decision_port.py         # JevDecisionPort (System-1 typed decisions SPI)
+│   ├── services/
+│   │   ├── context_optimizer.py             # RRF + Graph BFS + 0/1 Knapsack Token Allocator
+│   │   └── yaml_workflow_service.py         # Strict YAML task specification parser & validator
 │   └── use_cases/
-│       ├── generate_entity_use_case.py      # End-to-end entity generation use case
-│       └── audit_entity_use_case.py         # Canon consistency audit use case
+│       ├── generate_entity_use_case.py      # Single entity generation use case
+│       ├── audit_entity_use_case.py         # Canon consistency audit use case
+│       ├── orchestrate_swarm_use_case.py    # Multi-agent swarm DAG orchestration use case
+│       └── execute_workflow_use_case.py     # Declarative YAML workflow execution use case
 │
 ├── infrastructure/                          # 3. INFRASTRUCTURE LAYER (Secondary Adapters)
 │   └── adapters/
@@ -56,26 +68,37 @@ lore_builder/
 │       ├── memory/
 │       │   ├── tencent_memory_adapter.py    # Bridges to TencentDB-Agent-Memory v3 SDK
 │       │   └── in_memory_adapter.py         # In-memory L0-L3 & Wiki Graph (for unit tests / local dev)
-│       └── llm/
-│           ├── openai_compatible_adapter.py # Strict OpenRouter / OpenAI / Ollama adapter
-│           └── mock_llm_adapter.py          # Deterministic fixture generator for unit testing
+│       ├── llm/
+│       │   ├── openai_compatible_adapter.py # Strict OpenRouter / OpenAI / Ollama adapter
+│       │   └── mock_llm_adapter.py          # Deterministic fixture generator for unit testing
+│       └── audit/
+│           └── open_jev_lore_adapter.py     # Sub-50ms calibrated Jev System-1 decision engine
 │
-└── presentation/                            # 4. PRESENTATION LAYER (Primary Adapters)
-    ├── cli.py                               # Production Command-Line Interface
-    └── demo.py                              # End-to-end automated demonstration
+├── presentation/                            # 4. PRESENTATION LAYER (Primary Adapters)
+│   ├── cli.py                               # Production YAML Runner & Command-Line Interface
+│   └── demo.py                              # End-to-end automated demonstration
+│
+└── configs/
+    └── tasks.yml                            # Sample declarative YAML task workflow specification
 ```
 
 ---
 
 ## ⚡ Core Pillars
 
-### 1. OS Kernel Resource Shield ([JobObjects_RD](JobObjects_RD))
+### 1. Declarative YAML Workflow Engine
+Instead of passing dozens of brittle script parameters, tasks are specified in human-readable, version-controlled `.yml` files:
+* **Batch Task Pipelines:** Run entity generation, swarm DAGs, Jev canon audits, and ontology classifications in a single execution.
+* **World & Settings Isolation:** Declaratively define the target World Bible, runtime LLM provider, memory backend, and export output paths.
+* **Strict Schema Validation:** Zero silent fallbacks — syntax errors or missing parameters trigger explicit validation messages.
+
+### 2. OS Kernel Resource Shield ([JobObjects_RD](JobObjects_RD))
 Integrates directly with the native C++ `AgentJobEngine` library via 64-bit `ctypes`:
 * **Idle Working Set Compression (`TrimWorkingSetToCompressStore`):** While an agent awaits cloud LLM streaming responses, the OS memory manager compresses the agent runtime heap from **~180 MB down to < 15 MB** using macOS Darwin QoS (`PRIO_DARWIN_BG`) and Windows `_EJOB` Page Priority limits.
 * **Process Tree Freezing (`FreezeJobTree` / `ThawJobTree`):** Synchronizes generation pipelines. Downstream worker processes are frozen via `SIGSTOP` during canon audits with **0% CPU consumption**, preventing race conditions before being thawed via `SIGCONT`.
 * **Zero-Fallbacks Native Enforcement:** Native library loading and kernel calls are strictly enforced. Any kernel-level failure triggers explicit exceptions rather than silent simulated fallbacks.
 
-### 2. Hierarchical Memory ([TencentDB-Agent-Memory](TencentDB-Agent-Memory))
+### 3. Hierarchical Memory ([TencentDB-Agent-Memory](TencentDB-Agent-Memory))
 Structured knowledge flow preventing context window degradation:
 
 | Memory Layer | Domain Purpose | Storage & Retrieval |
@@ -86,15 +109,24 @@ Structured knowledge flow preventing context window degradation:
 | **Wiki + Link Graph** | **Entity Network:** Bidirectional connections between characters, factions, and places. | Backlinks, Outbound links, graph traversal. |
 | **L0 Conversation** | **Audit Trail:** Raw generation prompts and assistant drafts. | Session-scoped conversation logs. |
 
-### 3. Jev System-1 Calibrated Decision Engine (Tailored for Lore)
-Instead of relying solely on heavy, slow autoregressive LLM calls for validation (5–15 seconds per check), Lore AI Builder integrates **Jev / Open-Jev System-1 typed decisions** running in sub-50ms forward passes:
+### 4. Jev System-1 Decision Engine (Sub-50ms Non-Autoregressive Lore Decisions)
+Instead of relying on heavy, slow autoregressive LLM calls for validation (5–15 seconds per check), Lore AI Builder integrates **Jev / Open-Jev System-1 typed decisions** running in sub-50ms forward passes:
 * **`JevNoulDecision` (Axiom Compliance):** Non-autoregressive Boolean verdict with calibrated probability $P(\text{comply}) \in [0.0, 1.0]$. Tested in parallel against all World Bible immutable laws.
 * **`JevScoreDecision` (Lore Distortion Risk):** Ordinal assessment across calibrated severity levels (`none`, `minor`, `severe`, `canon_breaking`) with an expected risk score $[0.00 .. 3.00]$.
 * **`LoreOntologyRelationChoice` (Categorical Ontological Relations):** Multi-class decision predicting semantic relationship types (`allied_with`, `ruler_of`, `enemy_of`, `vassal_of`, `worships`, `located_in`) to populate the Wiki graph.
 * **`LoreTemporalChoice` (Allen's Interval Algebra):** Categorical temporal relation classification (`before`, `meets`, `during`, `overlaps`, `equals`, `after`) across historical epochs.
 * **"Read Once, Ask Many" (Jev v3 Architecture):** The World Bible state is rendered once and answers multiple axiom compliance questions in a single parallel pass without token re-encoding.
 
-### 4. Complete Worldbuilding Algorithmic Suite
+### 5. Zero-False-Positives Canon Defense
+A robust semantic filtering engine prevents erroneous rejections of valid canonical lore:
+* **Metaphorical & Attributive Immunity:** Distinguishes poetic figures of speech (*"undying loyalty"*, *"immortal legacy"*, *"infinite patience"*) from actual claims of physical or divine immortality.
+* **Beneficiary Cost Distinction:** Recognizes sentences describing magic performed *"without cost to the villagers"*, ensuring characters who made personal sacrifices are approved.
+* **Antagonist Interaction:** Allows mortal heroes who *"fought against the undying dreadlords"* without falsely attributing immortality to the hero.
+* **Grammatical Negation Detection:** Validates characters explicitly stating they *"were not immortal and accepted their mortal fate"*.
+* **Kinship Disambiguation in Timelines:** Prevents facts like *"Kaelen's father died in year 100"* from triggering false temporal paradoxes against Kaelen's subsequent deeds.
+* **Short-Name Fuzzy Guards:** Prevents distinct short names (*"Alden"* vs *"Aldon"*, *"Voss"* vs *"Ross"*) from being falsely merged by Jaro-Winkler similarity.
+
+### 6. Complete Worldbuilding Algorithmic Suite
 * **DAG Task Decomposition & Kahn's Topological Sort:** Breaks high-level worldbuilding prompts into dependency DAGs and organizes multi-agent generation waves.
 * **Allen's Interval Temporal Algebra:** Strictly detects causal timeline paradoxes (e.g. an entity born after a kingdom fell cannot be its founder).
 * **Jaro-Winkler Entity Resolution:** Deduplicates character and location names across multi-agent swarms with configurable similarity thresholds.
@@ -137,17 +169,17 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
 ## 🧪 Testing
 
-Run the full unit test suite (100% pass across all 17 tests):
+Run the full unit test suite (100% pass across all 30 tests):
 ```bash
 python3 -m pytest tests/unit/ -v
 ```
 
 Tests validate:
-* **Algorithms Suite (`test_algorithms.py`):** Allen's interval algebra, Jaro-Winkler entity resolution, DAG topological sorting, RRF + Knapsack token packing, triplet extraction, and end-to-end swarm orchestration.
-* **Jev System-1 Lore Engine (`test_jev_lore.py`):** Calibrated Noul axiom evaluations, Score distortion risks, Choice ontological relation classification, temporal interval analysis, and swarm knowledge graph enrichment.
-* **Core Pipeline & Kernel Shield (`test_lore_pipeline.py`):** Domain entity lifecycle, native C++ `JobObjects_RD` memory trimming and process freezing, and strict canon defense rejection.
-
----
+* **Declarative YAML Workflow Suite (`test_yaml_workflow.py`):** YAML workflow parsing, strict task type and parameter validation, end-to-end execution, and JSON report export.
+* **Zero-False-Positives Canon Defense Suite (`test_false_positives.py`):** Validates immunity for metaphorical figures of speech (*"undying loyalty"*, *"immortal legacy"*), beneficiary magic costs, battling immortal foes, explicit negations, relative death disambiguation, and short-name fuzzy guards.
+* **Jev System-1 Lore Engine Suite (`test_jev_lore.py`):** Calibrated Noul axiom evaluations, Score distortion risks, Choice ontological relation classification, temporal interval analysis, and swarm knowledge graph enrichment.
+* **Worldbuilding Algorithms Suite (`test_algorithms.py`):** Allen's interval algebra, Jaro-Winkler entity resolution, DAG topological sorting, RRF + Knapsack token packing, triplet extraction, and end-to-end swarm orchestration.
+* **Core Pipeline & Kernel Shield Suite (`test_lore_pipeline.py`):** Domain aggregate lifecycle, native C++ `JobObjects_RD` memory trimming and process freezing, and strict canon defense rejection.
 
 ---
 
