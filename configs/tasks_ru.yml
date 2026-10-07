@@ -18,6 +18,7 @@ settings:
   use_mock_llm: true          # true для детерминированного офлайн-запуска, false для OpenRouter
   use_tencent_memory: false   # true для кластера TencentDB Agent Memory
   output_file: "output/lore_results_ru.json"
+  memory_file: "output/lore_memory_ru.json"   # Сохранение полного состояния памяти L0–L3 в JSON
   log_level: "INFO"
 
 # Последовательность задач конвейера лора

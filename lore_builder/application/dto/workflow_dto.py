@@ -41,6 +41,7 @@ class WorkflowSettingsDTO:
     use_mock_llm: bool = False
     use_tencent_memory: bool = False
     output_file: Optional[str] = None
+    memory_file: Optional[str] = None
     log_level: str = "INFO"
 
 
@@ -61,3 +62,4 @@ class WorkflowExecutionResultDTO:
     failed_tasks: int
     task_results: List[Dict[str, Any]] = field(default_factory=list)
     output_file_written: Optional[str] = None
+    memory_file_written: Optional[str] = None

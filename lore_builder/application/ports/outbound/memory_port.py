@@ -41,3 +41,13 @@ class MemoryPort(ABC):
     def get_entity_wiki_graph(self, entity_name: str) -> Dict[str, Any]:
         """Query wiki link graph for relationships and connected entity nodes."""
         pass
+
+    @abstractmethod
+    def export_memory_snapshot(self) -> Dict[str, Any]:
+        """Export complete state of all memory tiers (L3 Core, L1 Facts, L0 Conversations, Knowledge Wiki)."""
+        pass
+
+    @abstractmethod
+    def dump_to_json(self, file_path: str) -> str:
+        """Persist full hierarchical memory snapshot (L0-L3) into a JSON file."""
+        pass

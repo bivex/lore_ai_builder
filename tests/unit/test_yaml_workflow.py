@@ -262,3 +262,55 @@ def test_russian_yaml_workflow_execution():
     t6 = res.task_results[5]["result"]
     assert t6["allen_relation"] == "before"
 
+    # Memory JSON Dump Verification
+    assert res.memory_file_written is not None
+    assert os.path.exists(res.memory_file_written)
+    with open(res.memory_file_written, "r", encoding="utf-8") as f:
+        mem_dump = json.load(f)
+        assert "l3_core" in mem_dump
+        assert "l1_atomic_facts" in mem_dump
+        assert "l0_conversations" in mem_dump
+        assert "knowledge_wiki_graph" in mem_dump
+        assert mem_dump["l3_core"]["name"] == "Северное Порубежье: Явь и Навь"
+        assert len(mem_dump["l1_atomic_facts"]) >= 10
+
+
+def test_l0_to_l3_memory_json_serialization_and_rehydration():
+    """Validates full serialization of L0-L3 memory tiers to JSON and rehydration into memory."""
+    memory = InMemoryLoreMemoryAdapter()
+    from lore_builder.domain.model.entity import LoreFact
+    from lore_builder.domain.model.aggregate import WorldBibleAggregate
+
+    custom_bible = WorldBibleAggregate(
+        world_id="w_test",
+        name="Test Dimension",
+        cosmology="A pocket realm of light",
+        immutable_laws=["Shadow cannot dwell here"],
+        tone="ethereal",
+    )
+    memory.save_world_bible(custom_bible)
+    memory.commit_atomic_fact(LoreFact(fact_id="f1", entity_name="Solar Avatar", statement="The sun never sets."))
+    memory.save_draft_conversation("sess_1", "Generate sun", "Sun generated")
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+        tmp_json = tf.name
+
+    try:
+        saved_path = memory.dump_to_json(tmp_json)
+        assert saved_path == tmp_json
+        assert os.path.exists(tmp_json)
+
+        new_memory = InMemoryLoreMemoryAdapter()
+        new_memory.load_from_json(tmp_json)
+
+        bible = new_memory.get_world_bible()
+        assert bible.name == "Test Dimension"
+        assert bible.immutable_laws == ["Shadow cannot dwell here"]
+
+        facts = new_memory.search_canonical_facts("Solar")
+        assert len(facts) == 1
+        assert facts[0].statement == "The sun never sets."
+    finally:
+        if os.path.exists(tmp_json):
+            os.remove(tmp_json)
+

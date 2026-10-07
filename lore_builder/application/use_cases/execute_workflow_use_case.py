@@ -85,12 +85,24 @@ class ExecuteWorkflowUseCase:
                 task_results,
             )
 
+        # 4. Export L0-L3 memory tiers to JSON
+        memory_file_written = None
+        target_mem_path = workflow.settings.memory_file
+        if not target_mem_path and workflow.settings.output_file:
+            base, ext = os.path.splitext(workflow.settings.output_file)
+            target_mem_path = f"{base}_memory.json"
+
+        if target_mem_path:
+            memory_file_written = self.memory.dump_to_json(target_mem_path)
+            logger.info(f"Persisted full L0-L3 memory state to JSON: {memory_file_written}")
+
         return WorkflowExecutionResultDTO(
             total_tasks=len(workflow.tasks),
             successful_tasks=successful,
             failed_tasks=failed,
             task_results=task_results,
             output_file_written=output_file_written,
+            memory_file_written=memory_file_written,
         )
 
     def _execute_single_task(self, task: WorkflowTaskDTO) -> Dict[str, Any]:

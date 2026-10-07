@@ -83,3 +83,72 @@ class InMemoryLoreMemoryAdapter(MemoryPort):
                 ],
             }
         return {"node": entity_name, "outbound_links": [], "inbound_links": []}
+
+    def export_memory_snapshot(self) -> Dict[str, Any]:
+        """Exports complete hierarchical state across all L0-L3 memory tiers and Wiki knowledge."""
+        return {
+            "l3_core": {
+                "world_id": self._bible.world_id,
+                "name": self._bible.name,
+                "cosmology": self._bible.cosmology,
+                "immutable_laws": self._bible.immutable_laws,
+                "tone": self._bible.tone,
+            },
+            "l1_atomic_facts": [
+                {
+                    "fact_id": f.fact_id,
+                    "entity_name": f.entity_name,
+                    "statement": f.statement,
+                    "tags": f.tags,
+                    "created_at": f.created_at.isoformat() if f.created_at else None,
+                }
+                for f in self._facts.values()
+            ],
+            "l0_conversations": list(self._conversations),
+            "knowledge_wiki_graph": dict(self._wiki_pages),
+        }
+
+    def dump_to_json(self, file_path: str) -> str:
+        """Persists full L0-L3 memory state into a clean JSON file."""
+        import json
+        import os
+
+        abs_path = os.path.abspath(file_path)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        with open(abs_path, "w", encoding="utf-8") as f:
+            json.dump(self.export_memory_snapshot(), f, indent=2, ensure_ascii=False)
+        return abs_path
+
+    def load_from_json(self, file_path: str) -> None:
+        """Rehydrates L0-L3 memory state from a saved JSON snapshot file."""
+        import json
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "l3_core" in data:
+            c = data["l3_core"]
+            self._bible = WorldBibleAggregate(
+                world_id=c.get("world_id", "loaded_world"),
+                name=c.get("name", "World Bible"),
+                cosmology=c.get("cosmology", ""),
+                immutable_laws=c.get("immutable_laws", []),
+                tone=c.get("tone", "fantasy"),
+            )
+
+        if "l1_atomic_facts" in data:
+            self._facts = {
+                item["fact_id"]: LoreFact(
+                    fact_id=item["fact_id"],
+                    entity_name=item["entity_name"],
+                    statement=item["statement"],
+                    tags=item.get("tags", []),
+                )
+                for item in data["l1_atomic_facts"]
+            }
+
+        if "l0_conversations" in data:
+            self._conversations = list(data["l0_conversations"])
+
+        if "knowledge_wiki_graph" in data:
+            self._wiki_pages = dict(data["knowledge_wiki_graph"])

@@ -123,9 +123,10 @@ def execute_yaml_file(file_path: str, use_live_tencent: bool = False, use_mock_l
             print(f"  ❌ Error: {item['error']}")
 
     print("\n" + "=" * 72)
-    print(f" ✨ WORKFLOW FINISHED: {result.successful_tasks} succeeded, {result.failed_tasks} failed out of {result.total_tasks} tasks.")
     if result.output_file_written:
-        print(f" 📄 Output exported to: {result.output_file_written}")
+        print(f" 📄 Task results exported to: {result.output_file_written}")
+    if getattr(result, "memory_file_written", None):
+        print(f" 💾 L0–L3 Memory exported to: {result.memory_file_written}")
     print("=" * 72)
 
 

@@ -62,10 +62,17 @@ class YamlWorkflowParser:
         if not isinstance(raw_settings, dict):
             raise ValueError(f"'settings' in {source_name} must be a dictionary.")
 
+        memory_file = (
+            raw_settings.get("memory_file")
+            or raw_settings.get("memory_output_file")
+            or raw_settings.get("save_memory_json")
+        )
+
         settings = WorkflowSettingsDTO(
             use_mock_llm=bool(raw_settings.get("use_mock_llm", False)),
             use_tencent_memory=bool(raw_settings.get("use_tencent_memory", False)),
             output_file=raw_settings.get("output_file"),
+            memory_file=str(memory_file) if memory_file else None,
             log_level=str(raw_settings.get("log_level", "INFO")).upper(),
         )
 

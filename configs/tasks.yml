@@ -18,6 +18,7 @@ settings:
   use_mock_llm: true          # Set to false to use OpenRouter (nemotron-3-ultra-550b)
   use_tencent_memory: false   # Set to true for live TencentDB Agent Memory cluster
   output_file: "output/lore_pipeline_results.json"
+  memory_file: "output/lore_memory.json"
   log_level: "INFO"
 
 # Pipeline Task Sequence

@@ -119,3 +119,38 @@ class TencentAgentMemoryAdapter(MemoryPort):
 
     def get_entity_wiki_graph(self, entity_name: str) -> Dict[str, Any]:
         return {"node": entity_name, "connected": []}
+
+    def export_memory_snapshot(self) -> Dict[str, Any]:
+        """Queries TencentDB Agent Memory cluster and exports complete state of all memory tiers."""
+        bible = self.get_world_bible()
+        facts = self.search_canonical_facts("", limit=100)
+        return {
+            "l3_core": {
+                "world_id": bible.world_id,
+                "name": bible.name,
+                "cosmology": bible.cosmology,
+                "immutable_laws": bible.immutable_laws,
+                "tone": bible.tone,
+            },
+            "l1_atomic_facts": [
+                {
+                    "fact_id": f.fact_id,
+                    "entity_name": f.entity_name,
+                    "statement": f.statement,
+                    "tags": f.tags,
+                    "created_at": f.created_at.isoformat() if f.created_at else None,
+                }
+                for f in facts
+            ],
+            "l0_conversations": [],
+            "knowledge_wiki_graph": {},
+        }
+
+    def dump_to_json(self, file_path: str) -> str:
+        """Persists L0-L3 memory snapshot from TencentDB into a JSON file."""
+        import json
+        abs_path = os.path.abspath(file_path)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        with open(abs_path, "w", encoding="utf-8") as f:
+            json.dump(self.export_memory_snapshot(), f, indent=2, ensure_ascii=False)
+        return abs_path
