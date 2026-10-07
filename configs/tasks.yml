@@ -1,0 +1,65 @@
+# ==============================================================================
+# Lore AI Builder — Declarative Task Workflow Specification
+# ==============================================================================
+version: "1.0"
+
+# Target World Bible Definition (L3 Core)
+world:
+  name: "Aethelgard"
+  cosmology: "A fractured plane orbiting a dying stellar core, bound by the Ley Lines."
+  immutable_laws:
+    - "Magic demands an equal sacrifice of vitality (No free energy)"
+    - "Mortals cannot achieve true divinity without burning their mortal shell"
+    - "The Void Rifts cannot be sealed, only diverted"
+  tone: "mythic_fantasy"
+
+# Runtime Execution Settings
+settings:
+  use_mock_llm: true          # Set to false to use OpenRouter (nemotron-3-ultra-550b)
+  use_tencent_memory: false   # Set to true for live TencentDB Agent Memory cluster
+  output_file: "output/lore_pipeline_results.json"
+  log_level: "INFO"
+
+# Pipeline Task Sequence
+tasks:
+  # Task 1: Generate high-ranking canonical entity
+  - type: generate
+    name: "The Iron Archon"
+    entity_type: character
+    prompt: "A mechanical golem general powered by blood sacrifice, defender of the Iron Citadel"
+    era: "First Age"
+    year: 120
+
+  # Task 2: Multi-Agent Swarm DAG Decomposition & Generation
+  - type: swarm
+    prompt: "Create the northern necromancer clan, their ancient feud with the sun paladins, and the war that changed their lands"
+
+  # Task 3: Jev System-1 Sub-50ms Canon Audit (Valid entity)
+  - type: audit
+    name: "Sir Gareth the Steadfast"
+    narrative: "Sir Gareth swore undying loyalty to the High King and sacrificed his shield arm in defense of the realm."
+
+  # Task 4: Jev System-1 Sub-50ms Canon Audit (Violating entity)
+  - type: audit
+    name: "Malakor the Undying"
+    narrative: "An immortal tyrant who cast infinite magic without sacrifice."
+
+  # Task 5: Jev System-1 Ontological Knowledge Graph Edge Classification
+  - type: classify
+    source: "High Commander Kaelen"
+    target: "The Silver Wardens"
+    context: "Commander Kaelen commands the Silver Wardens into battle against the Void."
+
+  # Task 6: Jev System-1 Allen Interval Historical Temporal Relation
+  - type: temporal
+    interval_a: "The Primordial Dawn"
+    interval_b: "The Age of Iron"
+    context: "The Primordial Dawn occurred centuries prior to the Age of Iron."
+
+  # Task 7: Jev System-1 Lore Distortion Risk Scoring
+  - type: score
+    narrative: "An ordinary blacksmith crafting bronze swords in the bustling marketplace."
+
+  # Task 8: Knowledge Graph Network Query
+  - type: graph
+    name: "The Iron Archon"

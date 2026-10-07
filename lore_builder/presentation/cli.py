@@ -22,6 +22,10 @@ from lore_builder.infrastructure.adapters.event_publisher import InMemoryEventPu
 from lore_builder.infrastructure.adapters.audit.open_jev_lore_adapter import OpenJevLoreAdapter
 
 
+from lore_builder.application.services.yaml_workflow_service import YamlWorkflowParser
+from lore_builder.application.use_cases.execute_workflow_use_case import ExecuteWorkflowUseCase
+
+
 def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
     if use_live_tencent:
         memory = TencentAgentMemoryAdapter()
@@ -55,15 +59,107 @@ def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
         jev_port=jev,
         audit_use_case=auditor,
     )
-    return memory, generator, orchestrator, jev
+    workflow_executor = ExecuteWorkflowUseCase(
+        memory_port=memory,
+        generator=generator,
+        orchestrator=orchestrator,
+        auditor=auditor,
+        jev_port=jev,
+    )
+    return memory, generator, orchestrator, jev, workflow_executor
+
+
+def execute_yaml_file(file_path: str, use_live_tencent: bool = False, use_mock_llm: bool = False) -> None:
+    """Parses and executes a YAML workflow specification file."""
+    workflow = YamlWorkflowParser.load_from_file(file_path)
+
+    effective_tencent = use_live_tencent or workflow.settings.use_tencent_memory
+    effective_mock_llm = use_mock_llm or workflow.settings.use_mock_llm
+
+    memory, generator, orchestrator, jev, executor = build_container(
+        use_live_tencent=effective_tencent,
+        use_mock_llm=effective_mock_llm,
+    )
+
+    print("=" * 72)
+    print(" 🌟 LORE AI BUILDER — DECLARATIVE YAML WORKFLOW EXECUTION")
+    print(f" Specification File: {os.path.abspath(file_path)} (v{workflow.version})")
+    print(f" Total Tasks: {len(workflow.tasks)}")
+    if workflow.world:
+        print(f" Target World: '{workflow.world.name}' ({len(workflow.world.immutable_laws)} immutable laws)")
+    print("=" * 72)
+
+    result = executor.execute(workflow)
+
+    for item in result.task_results:
+        idx = item["task_index"]
+        t_type = item["task_type"]
+        status = item["status"]
+        print(f"\n[TASK {idx}/{len(workflow.tasks)}] {t_type.upper()} [{status}]")
+        if status == "SUCCESS":
+            res = item["result"]
+            if t_type == "generate":
+                print(f"  • Entity: {res['entity_name']} ({res['entity_type']}) - Status: {res['status'].upper()}")
+                print(f"    Summary: {res['summary']}")
+                print(f"    Facts: {len(res['facts'])} committed to L1")
+            elif t_type == "swarm":
+                print(f"    Waves: {res['total_waves']} | Entities generated: {res['entities_count']} | Facts: {res['facts_committed']}")
+                for e in res["entities"]:
+                    print(f"      - {e['name']} ({e['type']})")
+            elif t_type == "audit":
+                print(f"    Verdict: {res['verdict']} | P(Compliant): {res['p_compliant']:.3f} | Risk: {res['distortion_risk_score']:.2f}/3.00")
+                print(f"    {res['explanation']}")
+            elif t_type == "classify":
+                print(f"    Relation: '{res['entity_a']}' --[{res['chosen_relation']}]--> '{res['entity_b']}' (Conf: {res['confidence']:.3f})")
+            elif t_type == "temporal":
+                print(f"    Allen Relation: '{res['interval_a']}' is [{res['allen_relation'].upper()}] relative to '{res['interval_b']}'")
+            elif t_type == "score":
+                print(f"    Distortion Risk Score: {res['score']:.2f}/3.00 (Conf: {res['confidence']:.3f})")
+            elif t_type == "graph":
+                print(f"    Wiki Node: {res.get('node', '')} | Outbound links: {res.get('outbound_links', [])}")
+            elif t_type == "show-world":
+                print(f"    World: '{res['name']}' | Cosmology: {res['cosmology']}")
+        else:
+            print(f"  ❌ Error: {item['error']}")
+
+    print("\n" + "=" * 72)
+    print(f" ✨ WORKFLOW FINISHED: {result.successful_tasks} succeeded, {result.failed_tasks} failed out of {result.total_tasks} tasks.")
+    if result.output_file_written:
+        print(f" 📄 Output exported to: {result.output_file_written}")
+    print("=" * 72)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Lore AI Builder — Hexagonal DDD Engine")
+    # Check for direct YAML file passed as first argument: python3 -m lore_builder.presentation.cli tasks.yml
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-") and (sys.argv[1].endswith(".yml") or sys.argv[1].endswith(".yaml")):
+        file_path = sys.argv[1]
+        use_tencent = "--tencent" in sys.argv
+        use_mock = "--mock-llm" in sys.argv
+        execute_yaml_file(file_path, use_live_tencent=use_tencent, use_mock_llm=use_mock)
+        return
+
+    # Check for -c / --config flags
+    for i, arg in enumerate(sys.argv):
+        if arg in ("-c", "--config") and i + 1 < len(sys.argv):
+            file_path = sys.argv[i + 1]
+            use_tencent = "--tencent" in sys.argv
+            use_mock = "--mock-llm" in sys.argv
+            execute_yaml_file(file_path, use_live_tencent=use_tencent, use_mock_llm=use_mock)
+            return
+
+    parser = argparse.ArgumentParser(
+        description="Lore AI Builder — Hexagonal DDD Engine (YAML Tasks & CLI)",
+        usage="%(prog)s [tasks.yml | command] [options]",
+    )
+    parser.add_argument("-c", "--config", dest="config_flag", help="Path to YAML task specification file")
     parser.add_argument("--tencent", action="store_true", help="Connect to live TencentDB memory endpoint")
     parser.add_argument("--mock-llm", action="store_true", help="Use offline Mock LLM instead of OpenRouter")
 
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
+
+    # Command: run (YAML workflow)
+    run_parser = subparsers.add_parser("run", help="Execute tasks defined in a YAML specification file")
+    run_parser.add_argument("file", help="Path to .yml / .yaml file")
 
     # Command: show-world
     subparsers.add_parser("show-world", help="Display the active World Bible (L3)")
@@ -106,7 +202,25 @@ def main():
     jev_temp_parser.add_argument("--context", required=True, help="Historical timeline narrative context")
 
     args = parser.parse_args()
-    memory, generator, orchestrator, jev = build_container(
+
+    # Check if a YAML task specification was provided directly
+    yaml_target = None
+    if args.config_file and (args.config_file.endswith(".yml") or args.config_file.endswith(".yaml") or os.path.exists(args.config_file)):
+        yaml_target = args.config_file
+    elif args.config_flag:
+        yaml_target = args.config_flag
+    elif args.command == "run" and hasattr(args, "file") and args.file:
+        yaml_target = args.file
+
+    if yaml_target:
+        execute_yaml_file(
+            file_path=yaml_target,
+            use_live_tencent=args.tencent,
+            use_mock_llm=args.mock_llm,
+        )
+        return
+
+    memory, generator, orchestrator, jev, executor = build_container(
         use_live_tencent=args.tencent,
         use_mock_llm=args.mock_llm,
     )

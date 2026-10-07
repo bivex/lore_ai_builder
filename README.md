@@ -149,9 +149,73 @@ Tests validate:
 
 ---
 
+---
+
 ## 🎮 Running the System
 
-### 1. Run the End-to-End Architectural Demo
+### 1. Declarative YAML Task Execution (Recommended)
+Tasks are defined declaratively in `.yml` files (`configs/tasks.yml`) rather than passing dozens of CLI flags:
+
+```bash
+python3 -m lore_builder.presentation.cli configs/tasks.yml
+```
+*(or explicitly: `python3 -m lore_builder.presentation.cli run configs/tasks.yml`)*
+
+#### Example `configs/tasks.yml` schema:
+```yaml
+version: "1.0"
+
+# Target World Bible Definition (L3 Core)
+world:
+  name: "Aethelgard"
+  cosmology: "A fractured plane orbiting a dying stellar core, bound by the Ley Lines."
+  immutable_laws:
+    - "Magic demands an equal sacrifice of vitality (No free energy)"
+    - "Mortals cannot achieve true divinity without burning their mortal shell"
+    - "The Void Rifts cannot be sealed, only diverted"
+
+# Runtime Execution Settings
+settings:
+  use_mock_llm: true          # Set to false to use OpenRouter (nvidia/nemotron-3-ultra-550b)
+  use_tencent_memory: false   # Set to true for live TencentDB Agent Memory cluster
+  output_file: "output/lore_pipeline_results.json"
+
+# Declarative Task Sequence
+tasks:
+  - type: generate
+    name: "The Iron Archon"
+    entity_type: character
+    prompt: "A mechanical golem general powered by blood sacrifice"
+    era: "First Age"
+    year: 120
+
+  - type: swarm
+    prompt: "Create the northern necromancer clan, their ancient feud with the sun paladins, and the war that changed their lands"
+
+  - type: audit
+    name: "Malakor the Undying"
+    narrative: "An immortal tyrant who cast infinite magic without sacrifice."
+
+  - type: classify
+    source: "High Commander Kaelen"
+    target: "The Silver Wardens"
+    context: "Commander Kaelen commands the Silver Wardens into battle against the Void."
+
+  - type: temporal
+    interval_a: "The Primordial Dawn"
+    interval_b: "The Age of Iron"
+    context: "The Primordial Dawn occurred centuries prior to the Age of Iron."
+
+  - type: score
+    narrative: "An ordinary blacksmith crafting bronze swords in the marketplace."
+
+  - type: graph
+    name: "The Iron Archon"
+```
+
+---
+
+### 2. Run the End-to-End Architectural Demo
 ```bash
 python3 -m lore_builder.presentation.demo
 ```
@@ -162,12 +226,12 @@ This demonstrates:
 4. Running sub-50ms **Jev System-1 Typed Decisions** (Noul axiom compliance, distortion score, ontology classification, Allen interval relation).
 5. Querying the resulting Wiki Link Graph.
 
-### 2. Live Generation via OpenRouter (`nvidia/nemotron-3-ultra-550b-a55b:free`)
+### 3. Live Generation via OpenRouter (`nvidia/nemotron-3-ultra-550b-a55b:free`)
 ```bash
 python3 test_openrouter_nemotron.py
 ```
 
-### 3. CLI Usage
+### 4. Interactive Command-Line Subcommands (Optional)
 
 #### View Active World Bible (L3):
 ```bash
