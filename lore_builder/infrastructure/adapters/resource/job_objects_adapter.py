@@ -2,7 +2,7 @@ import ctypes
 import os
 import platform
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from ....application.ports.outbound.resource_port import ResourceControllerPort
 
@@ -10,8 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class JobObjectsResourceAdapter(ResourceControllerPort):
-    """Adapter bridging ResourceControllerPort to the native C++ AgentJobEngine (JobObjects_RD).
+    """Adapter bridging ResourceControllerPort strictly to the native C++ AgentJobEngine (JobObjects_RD).
     
+    No fallbacks or simulation: requires the native library to load and execute OS kernel calls.
     Supports:
     - macOS Darwin Kernel (PRIO_DARWIN_BG working set trim, SIGSTOP/SIGCONT freeze/thaw, seatbelt sandbox)
     - Windows Kernel (_EJOB working set compression, JobObjectFreezeInformation, completion ports)
@@ -19,9 +20,10 @@ class JobObjectsResourceAdapter(ResourceControllerPort):
 
     def __init__(self, dylib_path: Optional[str] = None):
         self._sessions: Dict[str, ctypes.c_void_p] = {}
-        self._lib = self._load_library(dylib_path)
+        self._session_pids: Dict[str, Set[int]] = {}
+        self._lib = self._load_library_strictly(dylib_path)
 
-    def _load_library(self, custom_path: Optional[str]) -> Optional[ctypes.CDLL]:
+    def _load_library_strictly(self, custom_path: Optional[str]) -> ctypes.CDLL:
         paths_to_try = []
         if custom_path:
             paths_to_try.append(custom_path)
@@ -29,7 +31,6 @@ class JobObjectsResourceAdapter(ResourceControllerPort):
         current_dir = os.path.dirname(os.path.abspath(__file__))
         workspace_root = os.path.abspath(os.path.join(current_dir, "../../../.."))
 
-        # Default build location
         if platform.system() == "Darwin":
             paths_to_try.append(
                 os.path.join(workspace_root, "JobObjects_RD/out/build/lib/libAgentJobEngineC.dylib")
@@ -47,13 +48,15 @@ class JobObjectsResourceAdapter(ResourceControllerPort):
                 try:
                     lib = ctypes.CDLL(p)
                     self._setup_function_signatures(lib)
-                    logger.info(f"Loaded AgentJobEngine native library from {p}")
+                    logger.info(f"Strictly loaded native AgentJobEngine from {p}")
                     return lib
                 except Exception as e:
-                    logger.warning(f"Failed to load native library from {p}: {e}")
+                    raise RuntimeError(f"Failed to load native AgentJobEngine library at {p}: {e}")
 
-        logger.warning("AgentJobEngine native library not found. Operating in simulated fallback mode.")
-        return None
+        raise RuntimeError(
+            f"AgentJobEngine native library not found in paths: {paths_to_try}. "
+            "Native library is strictly required; fallbacks are disabled."
+        )
 
     def _setup_function_signatures(self, lib: ctypes.CDLL) -> None:
         lib.AgentEngine_CreateSession.argtypes = [
@@ -87,62 +90,74 @@ class JobObjectsResourceAdapter(ResourceControllerPort):
         auto_trim_idle: bool = True,
     ) -> str:
         session_id = f"job_session_{session_name}"
-        if self._lib:
-            handle = self._lib.AgentEngine_CreateSession(
-                session_name.encode("utf-8"),
-                ctypes.c_uint64(max_memory_mb * 1024 * 1024),
-                ctypes.c_uint32(cpu_cap_percent),
-                ctypes.c_bool(auto_trim_idle),
-            )
-            if handle:
-                self._sessions[session_id] = handle
-                return session_id
+        handle = self._lib.AgentEngine_CreateSession(
+            session_name.encode("utf-8"),
+            ctypes.c_uint64(max_memory_mb * 1024 * 1024),
+            ctypes.c_uint32(cpu_cap_percent),
+            ctypes.c_bool(auto_trim_idle),
+        )
+        if not handle:
+            raise RuntimeError(f"Native AgentEngine_CreateSession returned NULL for '{session_name}'.")
 
-        # Fallback simulation
-        self._sessions[session_id] = None
+        self._sessions[session_id] = handle
+        self._session_pids[session_id] = set()
         return session_id
 
     def assign_process(self, session_id: str, pid: int) -> bool:
-        handle = self._sessions.get(session_id)
-        if not hasattr(self, "_session_pids"):
-            self._session_pids = {}
-        if session_id not in self._session_pids:
-            self._session_pids[session_id] = set()
-        self._session_pids[session_id].add(pid)
+        if session_id not in self._sessions:
+            raise KeyError(f"Session '{session_id}' not found.")
+        handle = self._sessions[session_id]
 
-        if self._lib and handle:
-            return bool(self._lib.AgentEngine_AssignProcess(handle, ctypes.c_int32(pid)))
+        success = bool(self._lib.AgentEngine_AssignProcess(handle, ctypes.c_int32(pid)))
+        if not success:
+            raise RuntimeError(f"Native AgentEngine_AssignProcess failed to bind PID {pid} to '{session_id}'.")
+
+        self._session_pids[session_id].add(pid)
         return True
 
     def trim_working_set(self, session_id: str) -> bool:
-        handle = self._sessions.get(session_id)
-        if self._lib and handle:
-            return bool(self._lib.AgentEngine_TrimWorkingSet(handle))
+        if session_id not in self._sessions:
+            raise KeyError(f"Session '{session_id}' not found.")
+        handle = self._sessions[session_id]
+
+        success = bool(self._lib.AgentEngine_TrimWorkingSet(handle))
+        if not success:
+            raise RuntimeError(f"Native AgentEngine_TrimWorkingSet failed for '{session_id}'.")
         return True
 
     def freeze_execution(self, session_id: str) -> bool:
-        handle = self._sessions.get(session_id)
-        # Avoid self-SIGSTOP deadlock if the current process itself was assigned
-        pids = getattr(self, "_session_pids", {}).get(session_id, set())
+        if session_id not in self._sessions:
+            raise KeyError(f"Session '{session_id}' not found.")
+        handle = self._sessions[session_id]
+
+        # Safety guard for self-freeze: if only current PID is registered, skip self-SIGSTOP deadlock
+        pids = self._session_pids.get(session_id, set())
         if os.getpid() in pids and len(pids) == 1:
-            logger.debug(f"Skipping freeze on session {session_id} because only current PID is registered.")
+            logger.debug(f"Process tree only contains orchestrator PID {os.getpid()}; skipping self-SIGSTOP.")
             return True
 
-        if self._lib and handle:
-            return bool(self._lib.AgentEngine_FreezeJobTree(handle))
+        success = bool(self._lib.AgentEngine_FreezeJobTree(handle))
+        if not success:
+            raise RuntimeError(f"Native AgentEngine_FreezeJobTree failed for '{session_id}'.")
         return True
 
     def thaw_execution(self, session_id: str) -> bool:
-        handle = self._sessions.get(session_id)
-        pids = getattr(self, "_session_pids", {}).get(session_id, set())
+        if session_id not in self._sessions:
+            raise KeyError(f"Session '{session_id}' not found.")
+        handle = self._sessions[session_id]
+
+        pids = self._session_pids.get(session_id, set())
         if os.getpid() in pids and len(pids) == 1:
             return True
 
-        if self._lib and handle:
-            return bool(self._lib.AgentEngine_ThawJobTree(handle))
+        success = bool(self._lib.AgentEngine_ThawJobTree(handle))
+        if not success:
+            raise RuntimeError(f"Native AgentEngine_ThawJobTree failed for '{session_id}'.")
         return True
 
     def destroy_session(self, session_id: str) -> None:
         handle = self._sessions.pop(session_id, None)
-        if self._lib and handle:
-            self._lib.AgentEngine_DestroySession(handle)
+        self._session_pids.pop(session_id, None)
+        if not handle:
+            raise KeyError(f"Session '{session_id}' does not exist or was already destroyed.")
+        self._lib.AgentEngine_DestroySession(handle)

@@ -20,19 +20,21 @@ from lore_builder.infrastructure.adapters.llm.openai_compatible_adapter import O
 from lore_builder.infrastructure.adapters.event_publisher import InMemoryEventPublisherAdapter
 
 
-def build_container(use_live_tencent: bool = False, live_llm_url: str = None):
+def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
     if use_live_tencent:
         memory = TencentAgentMemoryAdapter()
     else:
         memory = InMemoryLoreMemoryAdapter()
 
+    # Strictly loads native C++ JobObjects_RD (fails if native dylib/dll missing)
     resources = JobObjectsResourceAdapter()
     events = InMemoryEventPublisherAdapter()
 
-    if live_llm_url:
-        llm = OpenAICompatibleLLMAdapter(base_url=live_llm_url)
-    else:
+    if use_mock_llm:
         llm = MockLLMAdapter(should_violate_canon=False)
+    else:
+        # Strictly queries OpenRouter using credentials from .env
+        llm = OpenAICompatibleLLMAdapter()
 
     auditor = AuditEntityUseCase(memory_port=memory, event_publisher=events)
     generator = GenerateEntityUseCase(
@@ -47,6 +49,9 @@ def build_container(use_live_tencent: bool = False, live_llm_url: str = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Lore AI Builder — Hexagonal DDD Engine")
+    parser.add_argument("--tencent", action="store_true", help="Connect to live TencentDB memory endpoint")
+    parser.add_argument("--mock-llm", action="store_true", help="Use offline Mock LLM instead of OpenRouter")
+
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # Command: show-world
@@ -60,12 +65,15 @@ def main():
     gen_parser.add_argument("--era", default="First Age", help="Historical Era")
     gen_parser.add_argument("--year", type=int, default=100, help="Timeline Year")
 
-    # Command: query-graph
+    # Command: graph
     graph_parser = subparsers.add_parser("graph", help="Query entity Wiki link graph")
     graph_parser.add_argument("--name", required=True, help="Entity name")
 
     args = parser.parse_args()
-    memory, generator = build_container()
+    memory, generator = build_container(
+        use_live_tencent=args.tencent,
+        use_mock_llm=args.mock_llm,
+    )
 
     if args.command == "show-world":
         bible = memory.get_world_bible()
@@ -82,18 +90,19 @@ def main():
         )
         res = generator.execute(cmd)
         print(f"\n[CANON COMMITTED]: {res.name} ({res.entity_type})")
+        print(f"Status: {res.status.upper()}")
         print(f"Summary: {res.summary}")
         print(f"Timeline: {res.timeline}")
-        print("Facts:")
+        print("\nFacts:")
         for f in res.facts:
             print(f"  • {f}")
-        print("Relations:")
+        print("\nRelations:")
         for r in res.relations:
-            print(f"  • {r['target']} [{r['type']}]")
+            print(f"  • {r['target']} [{r['type']}] ({r.get('context', '')})")
 
     elif args.command == "graph":
         g = memory.get_entity_wiki_graph(args.name)
-        print(json.dumps(g, indent=2))
+        print(json.dumps(g, indent=2, ensure_ascii=False))
 
     else:
         parser.print_help()

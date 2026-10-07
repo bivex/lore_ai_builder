@@ -51,11 +51,14 @@ class GenerateEntityUseCase(GenerateLoreUseCasePort):
             )
 
             facts_context = "\n".join(f"- {f.statement}" for f in relevant_facts) or "None recorded yet."
+            allowed_relations = ", ".join(f"'{e.value}'" for e in RelationType)
             system_prompt = (
                 f"{world_bible.render_prompt_context()}\n\n"
                 f"RELEVANT CANON FACTS (L1):\n{facts_context}\n\n"
-                "You are an expert worldbuilding chronicler. Output clean JSON with keys: "
-                "summary, description, facts (list of short strings), relations (list of objects with target, type, context)."
+                "You are an expert worldbuilding chronicler. Output ONLY clean valid JSON with exact keys: "
+                "\"summary\" (string), \"description\" (string), \"facts\" (list of strings), "
+                f"\"relations\" (list of objects with 'target', 'type', 'context').\n"
+                f"Allowed values for relation 'type': {allowed_relations}."
             )
 
             prompt = (
@@ -138,27 +141,58 @@ class GenerateEntityUseCase(GenerateLoreUseCasePort):
             self.resources.destroy_session(session_id)
 
     def _parse_llm_json(self, raw_text: str, cmd: GenerateEntityCommand) -> dict:
+        # Clean markdown code blocks if present
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+
         try:
-            # Clean markdown code blocks if present
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:]
-            if cleaned.startswith("```"):
-                cleaned = cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            return json.loads(cleaned.strip())
-        except Exception:
-            return {
-                "summary": f"{cmd.name} is a canonical {cmd.entity_type.value}.",
-                "description": raw_text,
-                "facts": [f"{cmd.name} was established in the realm."],
-                "relations": [],
-            }
+            data = json.loads(cleaned.strip())
+        except Exception as e:
+            raise ValueError(f"Strict LLM JSON parse failure for '{cmd.name}': {e}. Raw output: {raw_text}")
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Strict LLM format failure: expected JSON object, got {type(data).__name__}")
+
+        if "summary" not in data or "description" not in data:
+            raise ValueError(
+                f"Strict LLM format failure: missing 'summary' or 'description' in output: {data}"
+            )
+
+        return data
 
     def _parse_relation_type(self, raw_type: str) -> RelationType:
         raw_clean = raw_type.lower().strip()
         for member in RelationType:
             if member.value == raw_clean:
                 return member
-        return RelationType.ALLIED_WITH
+
+        # Normalization mapping for common synonyms
+        synonyms = {
+            "allied": RelationType.ALLIED_WITH,
+            "ally": RelationType.ALLIED_WITH,
+            "leader": RelationType.LEADER_OF,
+            "rules": RelationType.LEADER_OF,
+            "ruled": RelationType.LEADER_OF,
+            "member": RelationType.MEMBER_OF,
+            "enemy": RelationType.ENEMY_OF,
+            "located": RelationType.LOCATED_IN,
+            "location": RelationType.LOCATED_IN,
+            "creator": RelationType.CREATED_BY,
+            "created": RelationType.CREATED_BY,
+            "created_by": RelationType.CREATED_BY,
+            "possesses": RelationType.POSSESSES,
+            "possess": RelationType.POSSESSES,
+            "participated": RelationType.PARTICIPATED_IN,
+            "cause": RelationType.CAUSE_OF,
+        }
+        if raw_clean in synonyms:
+            return synonyms[raw_clean]
+
+        raise ValueError(
+            f"Invalid relation type '{raw_type}'. Allowed types: {[e.value for e in RelationType]}"
+        )
