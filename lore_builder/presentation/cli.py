@@ -12,6 +12,7 @@ from lore_builder.domain.model.value_objects import EntityType
 from lore_builder.application.dto.entity_dto import GenerateEntityCommand
 from lore_builder.application.use_cases.audit_entity_use_case import AuditEntityUseCase
 from lore_builder.application.use_cases.generate_entity_use_case import GenerateEntityUseCase
+from lore_builder.application.use_cases.orchestrate_swarm_use_case import OrchestrateSwarmUseCase
 from lore_builder.infrastructure.adapters.resource.job_objects_adapter import JobObjectsResourceAdapter
 from lore_builder.infrastructure.adapters.memory.in_memory_adapter import InMemoryLoreMemoryAdapter
 from lore_builder.infrastructure.adapters.memory.tencent_memory_adapter import TencentAgentMemoryAdapter
@@ -44,7 +45,13 @@ def build_container(use_live_tencent: bool = False, use_mock_llm: bool = False):
         event_publisher=events,
         audit_use_case=auditor,
     )
-    return memory, generator
+    orchestrator = OrchestrateSwarmUseCase(
+        memory_port=memory,
+        resource_controller=resources,
+        llm_provider=llm,
+        event_publisher=events,
+    )
+    return memory, generator, orchestrator
 
 
 def main():
@@ -58,19 +65,23 @@ def main():
     subparsers.add_parser("show-world", help="Display the active World Bible (L3)")
 
     # Command: generate
-    gen_parser = subparsers.add_parser("generate", help="Generate a new lore entity")
+    gen_parser = subparsers.add_parser("generate", help="Generate a single lore entity")
     gen_parser.add_argument("--name", required=True, help="Entity name")
     gen_parser.add_argument("--type", default="character", choices=[e.value for e in EntityType], help="Entity type")
     gen_parser.add_argument("--prompt", required=True, help="Details / background hint")
     gen_parser.add_argument("--era", default="First Age", help="Historical Era")
     gen_parser.add_argument("--year", type=int, default=100, help="Timeline Year")
 
+    # Command: swarm (Full DAG Multi-Agent Pipeline)
+    swarm_parser = subparsers.add_parser("swarm", help="Run multi-agent swarm DAG pipeline from a high-level worldbuilding prompt")
+    swarm_parser.add_argument("--prompt", required=True, help="High-level world prompt (e.g. 'Create the necromancer clan, their paladin enemies, and their war')")
+
     # Command: graph
     graph_parser = subparsers.add_parser("graph", help="Query entity Wiki link graph")
     graph_parser.add_argument("--name", required=True, help="Entity name")
 
     args = parser.parse_args()
-    memory, generator = build_container(
+    memory, generator, orchestrator = build_container(
         use_live_tencent=args.tencent,
         use_mock_llm=args.mock_llm,
     )
@@ -99,6 +110,17 @@ def main():
         print("\nRelations:")
         for r in res.relations:
             print(f"  • {r['target']} [{r['type']}] ({r.get('context', '')})")
+
+    elif args.command == "swarm":
+        print(f"\n[SWARM ORCHESTRATION INITIATED]")
+        result = orchestrator.execute(args.prompt)
+        print(f"\n✨ SWARM GENERATION COMPLETE across {result.total_waves} topological wave(s)!")
+        print(f"Entities committed: {len(result.entities_generated)}")
+        print(f"Facts recorded in L1: {result.facts_committed}")
+        for ent in result.entities_generated:
+            print(f"\n• {ent.name} [{ent.entity_type}] - {ent.status.upper()}")
+            print(f"  Summary: {ent.summary}")
+            print(f"  Relations: {[r['target'] for r in ent.relations]}")
 
     elif args.command == "graph":
         g = memory.get_entity_wiki_graph(args.name)

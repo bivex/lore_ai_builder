@@ -175,6 +175,12 @@ python3 lore_builder/presentation/cli.py generate \
   --year 100
 ```
 
+#### Run Full Multi-Agent Swarm DAG Pipeline:
+```bash
+python3 lore_builder/presentation/cli.py swarm \
+  --prompt "Create the northern necromancer clan, their ancient feud with the sun paladins, and the war that changed their lands"
+```
+
 #### Inspect Entity Wiki Link Graph:
 ```bash
 python3 lore_builder/presentation/cli.py graph --name "The Iron Archon"

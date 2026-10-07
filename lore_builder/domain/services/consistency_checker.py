@@ -1,7 +1,9 @@
+import re
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from ..model.aggregate import WorldBibleAggregate, LoreEntityAggregate
 from ..model.entity import LoreFact
+from .temporal_validator import TemporalConsistencyValidator, TimeInterval
 
 
 @dataclass(frozen=True)
@@ -13,7 +15,7 @@ class ConsistencyReport:
 
 
 class DomainConsistencyPolicy:
-    """Domain Service that audits proposed lore changes against World Bible axioms and known facts."""
+    """Domain Service that audits proposed lore changes against World Bible axioms, known facts, and Allen's temporal algebra."""
 
     @staticmethod
     def audit_entity(
@@ -26,25 +28,39 @@ class DomainConsistencyPolicy:
         # 1. Check against World Bible Immutable Laws (L3)
         entity_text = f"{entity.summary} {entity.description}".lower()
         for law in world_bible.immutable_laws:
-            # Domain heuristic: check for explicit negation of axioms
             law_lower = law.lower()
             if "no magic" in law_lower and "cast powerful magic" in entity_text:
                 contradictions.append(f"Violates world law: '{law}'")
             if "mortal" in law_lower and ("immortal" in entity_text or "undying" in entity_text):
                 contradictions.append(f"Violates mortality rule in law: '{law}'")
 
-        # 2. Check against Known Canonical Facts (L1)
+        # 2. Check against Known Canonical Facts (L1) & Temporal Contradictions
+        year_regex = re.compile(r"\b(?:in\s+year|year)\s+(\d+)\b", re.IGNORECASE)
+        died_regex = re.compile(r"\bdied(?:\s+in\s+year|\s+in)?\s+(\d+)\b", re.IGNORECASE)
+
         for fact in canonical_facts:
             fact_lower = fact.statement.lower()
-            # If fact specifies death or extinction:
-            if f"{entity.name.lower()} died" in fact_lower and entity.timeline_point:
-                # If entity is supposedly active after death
-                pass
+
+            # Check death vs active timeline point
+            if entity.name.lower() in fact_lower and "died" in fact_lower:
+                death_match = died_regex.search(fact_lower)
+                if death_match and entity.timeline_point:
+                    death_year = int(death_match.group(1))
+                    if entity.timeline_point.year > death_year:
+                        valid, err = TemporalConsistencyValidator.validate_participation(
+                            participant_name=entity.name,
+                            participant_lifespan=TimeInterval(start_year=0, end_year=death_year),
+                            event_name=f"Activity at {entity.timeline_point}",
+                            event_time=TimeInterval(start_year=entity.timeline_point.year),
+                        )
+                        if not valid:
+                            contradictions.append(err)
+
             # Direct contradiction check
             if f"not {entity.name.lower()}" in fact_lower:
                 contradictions.append(f"Contradicts known canon fact: '{fact.statement}'")
 
-        # 3. Check for circular or conflicting relations
+        # 3. Check for circular or self-conflicting relations
         for rel in entity.relations:
             if rel.target_entity_name.lower() == entity.name.lower():
                 contradictions.append(f"Entity cannot have self-relation: {rel.relation_type}")
